@@ -1,13 +1,13 @@
 #include <Arduino.h>
-#include <ds3231.h>
+#include <RTClib.h>
 #include <PMS.h>
 #include <dht.h>
 #include <MQUnifiedsensor.h>
 #include <SD.h>
+#include <Adafruit_SSD1306.h>
 
-// Define DS3231 pins
-#define DS3231_SDA_PIN GPIO_NUM_21
-#define DS3231_SCL_PIN GPIO_NUM_22
+RTC_DS3231 rtc;
+char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 
 // Define the PMS7003 serial pins
 #define PMS_RX_PIN GPIO_NUM_16  
@@ -28,7 +28,11 @@ int miso = GPIO_NUM_19;
 int mosi = GPIO_NUM_23;
 int cs = GPIO_NUM_5;
 
-i2c_dev_t ds3231_dev;
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+#define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 PMS pms(Serial1); // Use Serial1 for PMS communication
 PMS::DATA data;
@@ -40,7 +44,7 @@ MQUnifiedsensor MQ135(placa, Voltage_Resolution, ADC_Bit_Resolution, pin, type);
 
 // Timing variables
 unsigned long previousMillis = 0;
-const long interval = 120000; // Interval for reading sensors and logging data
+const long interval = 10000; // Interval for reading sensors and logging data
 
 void readFile(fs::FS &fs, const char *path) {
     Serial.printf("Reading file: %s\n", path);
@@ -137,6 +141,22 @@ extern "C" void app_main() {
     }
     Serial.println("Serial and Serial1 initialized."); // Debug print
 
+    if (! rtc.begin()) {
+        Serial.println("Couldn't find RTC");
+        Serial.flush();
+        while (1) delay(10);
+    }
+
+    if (rtc.lostPower()) {
+        Serial.println("RTC lost power, let's set the time!");
+        // When time needs to be set on a new device, or after a power loss, the
+        // following line sets the RTC to the date & time this sketch was compiled
+        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+        // This line sets the RTC with an explicit date & time, for example to set
+        // January 21, 2014 at 3am you would call:
+        // rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
+    }
+
     #ifdef REASSIGN_PINS
     SPI.begin(sck, miso, mosi, cs);
     if (!SD.begin(cs)) {
@@ -169,40 +189,21 @@ extern "C" void app_main() {
     Serial.printf("Total space: %lluMB\n", SD.totalBytes() / (1024 * 1024));
     Serial.printf("Used space: %lluMB\n", SD.usedBytes() / (1024 * 1024));
 
-    // Initialize DS3231
-    i2cdev_init();
-    ds3231_init_desc(&ds3231_dev, I2C_NUM_0, DS3231_SDA_PIN, DS3231_SCL_PIN);
-    delay(100); // Add a small delay to allow I2C to stabilize
-
-    /*// Set the time manually on the DS3231 (optional, only use if needed to set it initially)
-    struct tm timeinfo = {0};
-    timeinfo.tm_year = 2023 - 1900; // Year since 1900
-    timeinfo.tm_mon = 3 - 1;        // Month (0-11)
-    timeinfo.tm_mday = 15;           // Day of the month
-    timeinfo.tm_hour = 12;           // Hour (0-23)
-    timeinfo.tm_min = 0;             // Minutes
-    timeinfo.tm_sec = 0;             // Seconds
-    ds3231_set_time(&ds3231_dev, &timeinfo);*/
-
-    // Read current time from DS3231
-    struct tm current_time;
-    esp_err_t ret_ds = ds3231_get_time(&ds3231_dev, &current_time);
-    
-    if (ret_ds != ESP_OK) {
-        Serial.println("Failed to read time from DS3231");
-        return; // Exit if reading time fails
+    // Initialize the OLED display
+    if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+        Serial.println(F("SSD1306 allocation failed"));
+        for(;;); // Don't proceed, loop forever
     }
+    display.clearDisplay(); // Clear the display buffer
 
-    // Print the current time and date
-    printf("Current Time: %02d:%02d:%02d, Date: %02d/%02d/%04d\n", 
-           current_time.tm_hour, current_time.tm_min, current_time.tm_sec, 
-           current_time.tm_mday, current_time.tm_mon + 1, current_time.tm_year + 1900);
+    // Initialize DS3231
+
 
     Serial.print("Waking PMS7003 up");
     pms.passiveMode(); // Set the PMS to passive mode
     pms.wakeUp(); // Wake up the sensor
 
-    delay(30000); // Wait for stable readings of PMS7003
+    delay(5000); // Wait for stable readings of PMS7003
 
     Serial.println("PMS7003 woken up!"); // Debug print
 
@@ -239,6 +240,9 @@ extern "C" void app_main() {
         // Attempt to create the file
         writeFile(SD, "/aq_log.csv", "Date,Time,PM 1.0,PM 2.5,PM 10.0,MQ135 PPM,Temperature,Humidity\n");
     }
+    else{
+        printf("File existed!\n");
+    }
 
     while (true) {
         unsigned long currentMillis = millis();
@@ -246,18 +250,20 @@ extern "C" void app_main() {
         if (currentMillis - previousMillis >= interval) {
             previousMillis = currentMillis;
             //Wake up PMS7003 before reading
+            printf("Waking PMS7003\n");
             pms.wakeUp();
-            delay(30000);
+            delay(5000);
             
             // DS3231 task
-            esp_err_t ret_ds = ds3231_get_time(&ds3231_dev, &current_time); // Read current time from DS3231
-            if (ret_ds != ESP_OK) {
-                Serial.println("Failed to read time from DS3231");
-                return; // Exit if reading time fails
-            }
-            printf("Date: %02d/%02d/%04d, Time: %02d:%02d:%02d\n",
-                    current_time.tm_mday, current_time.tm_mon + 1, current_time.tm_year + 1900,
-                    current_time.tm_hour, current_time.tm_min, current_time.tm_sec);
+            DateTime now = rtc.now();
+            printf("%d/%d/%d (%s) %02d:%02d:%02d\n", 
+            now.year(), 
+            now.month(), 
+            now.day(), 
+            daysOfTheWeek[now.dayOfTheWeek()], 
+            now.hour(), 
+            now.minute(), 
+            now.second());
 
             // PMS7003 task
             pms.requestRead(); // Request data from the sensor
@@ -285,13 +291,30 @@ extern "C" void app_main() {
 
             // Concatenate all data into a single string for logging
             char logEntry[200];
-            sprintf(logEntry, "%02d/%02d/%04d,%02d:%02d:%02d,%.d,%.d,%.d,%.2f,%.1f,%.1f%%",
-                    current_time.tm_mday, current_time.tm_mon + 1, current_time.tm_year + 1900, 
-                    current_time.tm_hour, current_time.tm_min, current_time.tm_sec,
+            sprintf(logEntry, "%d/%d/%d,%02d:%02d:%02d,%.d,%.d,%.d,%.2f,%.1f,%.1f%%",
+                    now.day(), now.month(),now.year(), 
+                    now.hour(), now.minute(), now.second(),
                     data.PM_AE_UG_1_0, data.PM_AE_UG_2_5, data.PM_AE_UG_10_0,
                     My_PPM,
                     temperature, humidity);
             logData(logEntry); // Log the concatenated data
+
+            // Update the OLED display with sensor data
+            display.clearDisplay(); // Clear the display buffer
+            display.setTextSize(2); // Normal text size
+            display.setTextColor(SSD1306_WHITE); // Draw white text
+            display.setCursor(0, 0); // Start at top-left corner
+
+            // Display the AQI and sensor data
+            display.println("AQI");
+            display.setTextSize(1);
+            display.printf("PM2.5: %.d\n", data.PM_AE_UG_2_5);
+            display.printf("PM10.0: %.d\n", data.PM_AE_UG_10_0);
+            display.printf("CO2: %.2f\n", My_PPM);
+            display.printf("Temp: %.1f\n", temperature);
+            display.printf("Humid: %.1f%%\n", humidity);
+
+            display.display(); // Show the display buffer on the screen
             
             printf("\n");
 
