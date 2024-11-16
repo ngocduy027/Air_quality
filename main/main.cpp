@@ -26,7 +26,7 @@ char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursd
 #define RatioMQ131CleanAir 15 // RS / R0 = 3.6 ppm
 #define RatioMQ7CleanAir 27.5
 
-// Define OLED pins
+// Define SDCard Module pins
 #define REASSIGN_PINS
 int sck = GPIO_NUM_18;
 int miso = GPIO_NUM_19;
@@ -274,7 +274,7 @@ extern "C" void app_main() {
     }
 
     while (true) {
-        unsigned long currentMillis = millis();
+        //unsigned long currentMillis = millis();
 
         //if (currentMillis - previousMillis >= interval) {
             //previousMillis = currentMillis;
