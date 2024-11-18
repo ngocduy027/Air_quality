@@ -9,13 +9,11 @@
 RTC_DS3231 rtc;
 char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 
-// Define the PMS7003 serial pins
-#define PMS_RX_PIN GPIO_NUM_16  
-#define PMS_TX_PIN GPIO_NUM_17 
+#define PMS_RX_PIN GPIO_NUM_17  
+#define PMS_TX_PIN GPIO_NUM_16 
 
 #define DHT_GPIO GPIO_NUM_27
 
-// Define MQ sensors pins
 #define placa "ESP32"
 #define Voltage_Resolution 3.3
 #define ADC_Bit_Resolution 12
@@ -23,10 +21,9 @@ char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursd
 #define MQ7_pin GPIO_NUM_32
 #define MQ131_type "MQ-131"
 #define MQ7_type "MQ-7"
-#define RatioMQ131CleanAir 15 // RS / R0 = 3.6 ppm
+#define RatioMQ131CleanAir 15
 #define RatioMQ7CleanAir 27.5
 
-// Define SDCard Module pins
 #define REASSIGN_PINS
 int sck = GPIO_NUM_18;
 int miso = GPIO_NUM_19;
@@ -143,7 +140,7 @@ void logData(const char* data) {
 
     // Ensure data is written to the file
     logFile.flush();
-    logFile.close(); // Close the file after writing
+    logFile.close();
 }
 
 extern "C" void app_main() {
@@ -157,7 +154,7 @@ extern "C" void app_main() {
     while (!Serial1) {
         delay(10);
     }
-    Serial.println("Serial and Serial1 initialized."); // Debug print
+    Serial.println("Serial and Serial1 initialized.");
 
     // Initialize DS3231
     if (! rtc.begin()) {
@@ -176,6 +173,7 @@ extern "C" void app_main() {
         // rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
     }
 
+    // Initialize SDCard
     #ifdef REASSIGN_PINS
     SPI.begin(sck, miso, mosi, cs);
     if (!SD.begin(cs)) {
@@ -215,8 +213,10 @@ extern "C" void app_main() {
     }
     display.clearDisplay(); // Clear the display buffer
 
+    // Initialize PMS7003
     pms.passiveMode(); // Set the PMS to passive mode
 
+    // Initialize MQ sensors
     MQ131.setRegressionMethod(1);
     MQ131.setA(23.943);
     MQ131.setB(-1.11);
@@ -228,22 +228,21 @@ extern "C" void app_main() {
     MQ7.setB(-1.518);
     MQ7.init();
 
-    /*//Set R0 manually
+    //Set R0 manually
     float MQ7_R0 = 22.64;
     MQ7.setR0(MQ7_R0);
     
     float MQ131_R0 = 12.93;
-    MQ131.setR0(MQ131_R0);*/
-    //MQ131.setRL(20);
+    MQ131.setR0(MQ131_R0);
 
-    // Calibrate MQ135 R0
+    // Calibrate R0
     // Explanation: 
     // In this routine the sensor will measure the resistance of the sensor supposedly before being pre-heated
     // and on clean air (Calibration conditions), setting up R0 value.
     // We recomend executing this routine only on setup in laboratory conditions.
     // This routine does not need to be executed on each restart, you can load your R0 value from eeprom.
     // Acknowledgements: https://jayconsystems.com/blog/understanding-a-gas-sensor
-    Serial.print("Calibrating please wait.");
+    /*Serial.print("Calibrating please wait.");
     float calc131R0 = 0;
     printf("R0_131: %f\n", calc131R0);
     for(int i = 1; i<=10; i ++){
@@ -280,7 +279,7 @@ extern "C" void app_main() {
     Serial.println("  done!.");
     if(isinf(calc7R0)) {Serial.println("Warning: Conection issue, R0 is infinite (Open circuit detected) please check your wiring and supply"); while(1);}
     if(calc7R0 == 0){Serial.println("Warning: Conection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply"); while(1);}
-    MQ7.serialDebug(true);
+    MQ7.serialDebug(true);*/
 
     // Check if the log file exists
     if (!SD.exists("/aq_log.csv")) {
@@ -298,7 +297,6 @@ extern "C" void app_main() {
         //if (currentMillis - previousMillis >= interval) {
             //previousMillis = currentMillis;
             //Wake up PMS7003 before reading
-            printf("Waking PMS7003 up\n");
             pms.wakeUp();
             delay(3000);
             
@@ -322,7 +320,7 @@ extern "C" void app_main() {
             }
             //pms.sleep();
 
-            // MQ task
+            // MQ sensors task
             MQ131.update(); // Update data, the arduino will read the voltage from the analog pin
             MQ131.readSensor(); // Sensor will read PPM concentration using the model, a and b values set previously or from the setup
             float MQ131_PPM = MQ131.getPPM();
@@ -333,8 +331,7 @@ extern "C" void app_main() {
             float MQ7_PPM = MQ7.getPPM();
             printf("CO: %.2f\n", MQ7_PPM);
 
-            // DHT11 task
-            //esp_err_t result = dht_read_float_data(DHT_TYPE_DHT11, DHT_GPIO, &humidity, &temperature); //DHT11
+            // DHT22 task
             esp_err_t result = dht_read_float_data(DHT_TYPE_AM2301, DHT_GPIO, &humidity, &temperature); //DHT22
             // Check if reading is successful
             if (result == ESP_OK) {
@@ -362,7 +359,7 @@ extern "C" void app_main() {
             display.setTextColor(SSD1306_WHITE); // Draw white text
             display.setCursor(0, 0); // Start at top-left corner
 
-            // Display the AQI and sensor data
+            // Display sensors data
             display.println("AirQuality");
             display.setTextSize(1);
             display.printf("PM2.5: %.dug/m3\n", data.PM_AE_UG_2_5);
