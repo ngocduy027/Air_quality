@@ -5,6 +5,7 @@
 #include <MQUnifiedsensor.h>
 #include <SD.h>
 #include <Adafruit_SSD1306.h>
+#include <ADS1115_WE.h>
 
 RTC_DS3231 rtc;
 char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
@@ -15,7 +16,7 @@ char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursd
 #define DHT_GPIO GPIO_NUM_27
 
 #define placa "ESP32"
-#define Voltage_Resolution 3.3
+#define Voltage_Resolution 5
 #define ADC_Bit_Resolution 12
 #define MQ131_pin GPIO_NUM_33
 #define MQ7_pin GPIO_NUM_32
@@ -48,6 +49,8 @@ float temperature = 0;
 
 MQUnifiedsensor MQ131(placa, Voltage_Resolution, ADC_Bit_Resolution, MQ131_pin, MQ131_type);
 MQUnifiedsensor MQ7(placa, Voltage_Resolution, ADC_Bit_Resolution, MQ7_pin, MQ7_type);
+
+ADS1115_WE ads(0x48);
 
 // Timing variables
 unsigned long previousMillis = 0;
@@ -216,6 +219,15 @@ extern "C" void app_main() {
     // Initialize PMS7003
     pms.passiveMode(); // Set the PMS to passive mode
 
+    //Initiate ADS1115
+    ads.init();
+    if(!ads.init()){
+        Serial.println("ADS1115 not connected!");
+    }
+    ads.setVoltageRange_mV(ADS1115_RANGE_1024);
+    ads.setConvRate(ADS1115_128_SPS);
+    ads.setMeasureMode(ADS1115_SINGLE);
+
     // Initialize MQ sensors
     MQ131.setRegressionMethod(1);
     MQ131.setA(23.943);
@@ -228,12 +240,12 @@ extern "C" void app_main() {
     MQ7.setB(-1.518);
     MQ7.init();
 
-    //Set R0 manually
+    /*//Set R0 manually
     float MQ7_R0 = 22.64;
     MQ7.setR0(MQ7_R0);
     
     float MQ131_R0 = 12.93;
-    MQ131.setR0(MQ131_R0);
+    MQ131.setR0(MQ131_R0);*/
 
     // Calibrate R0
     // Explanation: 
@@ -242,22 +254,23 @@ extern "C" void app_main() {
     // We recomend executing this routine only on setup in laboratory conditions.
     // This routine does not need to be executed on each restart, you can load your R0 value from eeprom.
     // Acknowledgements: https://jayconsystems.com/blog/understanding-a-gas-sensor
-    /*Serial.print("Calibrating please wait.");
+    Serial.print("Calibrating please wait.");
     float calc131R0 = 0;
-    printf("R0_131: %f\n", calc131R0);
+    printf("R0_131 before: %f\n", calc131R0);
     for(int i = 1; i<=10; i ++){
-        MQ131.update(); // Update data, the arduino will read the voltage from the analog pin
-        float MQ131_Voltage = MQ131.getVoltage();
-        uint16_t MQ131Volt = analogRead(MQ131_pin);
-        printf("MQ131 Voltage: %f\n", MQ131_Voltage);
-        printf("MQ131 GPIO Voltage: %d\n", MQ131Volt);
-        printf("R0_131xxx: %f\n", calc131R0);
+        ads.setSingleChannel(0);
+        //for(int i=0; i<128; i++){ // counter is 32, conversion rate is 8 SPS --> 4s
+            ads.startSingleMeasurement();
+            while(ads.isBusy()){delay(0);}
+        //}
+        float voltager0MQ131 = ads.getResult_V(); // Get voltage in volts
+        printf("MQ131 Voltage: %f\n", voltager0MQ131);
+        MQ131.externalADCUpdate(voltager0MQ131);
         calc131R0 += MQ131.calibrate(RatioMQ131CleanAir);
-        printf("R0_131yyy: %f\n", calc131R0);
         Serial.print(".");
     }
     MQ131.setR0(calc131R0/10);
-    printf("R0_131zzz: %f\n", calc131R0);
+    printf("R0_131 after: %f\n", calc131R0);
     Serial.println("  done!.");
     if(isinf(calc131R0)) {Serial.println("Warning: Conection issue, R0 is infinite (Open circuit detected) please check your wiring and supply"); while(1);}
     if(calc131R0 == 0){Serial.println("Warning: Conection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply"); while(1);}
@@ -267,19 +280,22 @@ extern "C" void app_main() {
     Serial.print("Calibrating please wait.");
     float calc7R0 = 0;
     for(int i = 1; i<=10; i ++){
-        MQ7.update(); // Update data, the arduino will read the voltage from the analog pin
-        float MQ7_Voltage = MQ7.getVoltage();
-        printf("MQ7 Voltage: %f\n", MQ7_Voltage);
-        printf("R0_7xxx: %f\n", calc7R0);
+        ads.setSingleChannel(1);
+        //for(int i=0; i<128; i++){ // counter is 32, conversion rate is 8 SPS --> 4s
+            ads.startSingleMeasurement();
+            while(ads.isBusy()){delay(0);}
+        //}
+        float voltager0MQ7 = ads.getResult_V(); // Get voltage in volts
+        printf("MQ7 Voltage: %f\n", voltager0MQ7);
+        MQ7.externalADCUpdate(voltager0MQ7);
         calc7R0 += MQ7.calibrate(RatioMQ7CleanAir);
-        printf("R0_7yyy: %f\n", calc7R0);
         Serial.print(".");
     }
     MQ7.setR0(calc7R0/10);
     Serial.println("  done!.");
     if(isinf(calc7R0)) {Serial.println("Warning: Conection issue, R0 is infinite (Open circuit detected) please check your wiring and supply"); while(1);}
     if(calc7R0 == 0){Serial.println("Warning: Conection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply"); while(1);}
-    MQ7.serialDebug(true);*/
+    MQ7.serialDebug(true);
 
     // Check if the log file exists
     if (!SD.exists("/aq_log.csv")) {
@@ -292,21 +308,22 @@ extern "C" void app_main() {
     }
 
     while (true) {
-        //unsigned long currentMillis = millis();
+        unsigned long currentMillis = millis();
 
-        //if (currentMillis - previousMillis >= interval) {
-            //previousMillis = currentMillis;
+        vTaskDelay(5000 / portTICK_PERIOD_MS);
+        if (currentMillis - previousMillis >= interval) {
+            previousMillis = currentMillis;
             //Wake up PMS7003 before reading
-            pms.wakeUp();
-            delay(3000);
+            //pms.wakeUp();
+            //delay(3000);
             
             // DS3231 task
             DateTime now = rtc.now();
-            printf("%d/%d/%d (%s) %02d:%02d:%02d\n", 
-            now.year(), 
-            now.month(), 
+            printf("%s, %d/%d/%d %02d:%02d:%02d\n",
+            daysOfTheWeek[now.dayOfTheWeek()],  
             now.day(), 
-            daysOfTheWeek[now.dayOfTheWeek()], 
+            now.month(), 
+            now.year(), 
             now.hour(), 
             now.minute(), 
             now.second());
@@ -314,28 +331,40 @@ extern "C" void app_main() {
             // PMS7003 task
             pms.requestRead(); // Request data from the sensor
             if (pms.readUntil(data)) { // Read data until available
-                printf("PM2.5: %.d, PM10.0: %.d\n", data.PM_AE_UG_2_5, data.PM_AE_UG_10_0);
+                printf("PM2.5: %.dug/m3\nPM10.0: %.dug/m3\n", data.PM_AE_UG_2_5, data.PM_AE_UG_10_0);
             } else {
                 Serial.println("No data from PMS7003.");
             }
             //pms.sleep();
 
             // MQ sensors task
-            MQ131.update(); // Update data, the arduino will read the voltage from the analog pin
-            MQ131.readSensor(); // Sensor will read PPM concentration using the model, a and b values set previously or from the setup
-            float MQ131_PPM = MQ131.getPPM();
-            printf("O3: %.2f\n", MQ131_PPM);
+            ads.setSingleChannel(0);
+            //for(int i=0; i<128; i++){ // counter is 32, conversion rate is 8 SPS --> 4s
+                ads.startSingleMeasurement();
+                while(ads.isBusy()){delay(0);}
+            //}
+            float voltageMQ131 = ads.getResult_V(); // Get voltage in volts
+            printf("MQ131 Voltage: %fmV\n", voltageMQ131);
+            MQ131.externalADCUpdate(voltageMQ131);
+            float MQ131_PPM = MQ131.readSensor();
+            printf("O3 Concentration: %.2fppm\n", MQ131_PPM);
 
-            MQ7.update(); // Update data, the arduino will read the voltage from the analog pin
-            MQ7.readSensor(); // Sensor will read PPM concentration using the model, a and b values set previously or from the setup
-            float MQ7_PPM = MQ7.getPPM();
-            printf("CO: %.2f\n", MQ7_PPM);
+            ads.setSingleChannel(1);
+            //for(int i=0; i<128; i++){ // counter is 32, conversion rate is 8 SPS --> 4s
+                ads.startSingleMeasurement();
+                while(ads.isBusy()){delay(0);}
+            //}
+            float voltageMQ7 = ads.getResult_V(); // Get voltage in volts
+            printf("MQ7 Voltage: %fmV\n", voltageMQ7);
+            MQ7.externalADCUpdate(voltageMQ7);
+            float MQ7_PPM = MQ7.readSensor();
+            printf("CO Concentration: %.2fppm\n", MQ7_PPM);
 
             // DHT22 task
             esp_err_t result = dht_read_float_data(DHT_TYPE_AM2301, DHT_GPIO, &humidity, &temperature); //DHT22
             // Check if reading is successful
             if (result == ESP_OK) {
-                printf("Temperature: %.1f, Humidity: %.1f%%\n", temperature, humidity);
+                printf("Temperature: %.1f*C, Humidity: %.1f%%\n", temperature, humidity);
             } else {
                 printf("Failed to read data from DHT22 sensor: %d\n", result);
             }
@@ -374,6 +403,6 @@ extern "C" void app_main() {
             printf("\n");
 
             vTaskDelay(9000 / portTICK_PERIOD_MS); //Sampling frequency
-        //}
+        }
     }
 }
