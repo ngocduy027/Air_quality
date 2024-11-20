@@ -22,7 +22,7 @@ char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursd
 #define MQ7_pin GPIO_NUM_32
 #define MQ131_type "MQ-131"
 #define MQ7_type "MQ-7"
-#define RatioMQ131CleanAir 15
+#define RatioMQ131CleanAir 75
 #define RatioMQ7CleanAir 27.5
 
 #define REASSIGN_PINS
