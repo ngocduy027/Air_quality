@@ -301,16 +301,17 @@ extern "C" void app_main() {
     if (!SD.exists("/aq_log.csv")) {
         Serial.println("Log file does not exist. Attempting to create it...");
         // Attempt to create the file
-        writeFile(SD, "/aq_log.csv", "Date,Time,PM 2.5,PM 10.0,MQ131(ug/m3),MQ7(ug/m3),Temperature,Humidity\n");
+        writeFile(SD, "/aq_log.csv", "Date,Time,PM 2.5,PM 10.0,O3(PPM),CO(PPM),O3(ug/m3),CO(ug/m3),Temperature,Humidity\n");
     }
     else{
         printf("File existed!\n");
     }
+    
+    vTaskDelay(5000 / portTICK_PERIOD_MS);
 
     while (true) {
         unsigned long currentMillis = millis();
 
-        vTaskDelay(5000 / portTICK_PERIOD_MS);
         if (currentMillis - previousMillis >= interval) {
             previousMillis = currentMillis;
             //Wake up PMS7003 before reading
@@ -374,10 +375,11 @@ extern "C" void app_main() {
 
             // Concatenate all data into a single string for logging
             char logEntry[200];
-            sprintf(logEntry, "%d/%d/%d,%02d:%02d:%02d,%.d,%.d,%.2f,%.2f,%.1f,%.1f%%",
+            sprintf(logEntry, "%d/%d/%d,%02d:%02d:%02d,%.d,%.d,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f",
                     now.day(), now.month(),now.year(), 
                     now.hour(), now.minute(), now.second(),
                     data.PM_AE_UG_2_5, data.PM_AE_UG_10_0,
+                    MQ131_PPM, MQ7_PPM,
                     converted_MQ131_PPM, converted_MQ7_PPM,
                     temperature, humidity);
             logData(logEntry); // Log the concatenated data
