@@ -1,3 +1,7 @@
+#define BLYNK_TEMPLATE_ID "TMPL63aGqNxKU"
+#define BLYNK_TEMPLATE_NAME "Air Quality"
+#define BLYNK_AUTH_TOKEN "8o6SipbVqZJVbJrYZCickzBm5d78dnN0"
+
 #include <Arduino.h>
 #include <RTClib.h>
 #include <PMS.h>
@@ -6,6 +10,10 @@
 #include <SD.h>
 #include <Adafruit_SSD1306.h>
 #include <ADS1115_WE.h>
+#include <WiFi.h>
+#include <WiFiClient.h>
+//#include <Blynk.h>
+#include <BlynkSimpleEsp32.h>
 
 RTC_DS3231 rtc;
 char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
@@ -40,6 +48,9 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 // Conversion constants
 #define CONVERSION_FACTOR 0.0409
 #define MG_TO_UG 1000.0  // 1 mg = 1000 µg
+
+char ssid[] = "Thach";
+char pass[] = "duyvi028";
 
 PMS pms(Serial1); // Use Serial1 for PMS communication
 PMS::DATA data;
@@ -158,6 +169,8 @@ extern "C" void app_main() {
         delay(10);
     }
     Serial.println("Serial and Serial1 initialized.");
+
+    Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
 
     // Initialize DS3231
     if (! rtc.begin()) {
@@ -310,6 +323,8 @@ extern "C" void app_main() {
     vTaskDelay(5000 / portTICK_PERIOD_MS);
 
     while (true) {
+        Blynk.run();
+        
         unsigned long currentMillis = millis();
 
         if (currentMillis - previousMillis >= interval) {
@@ -333,6 +348,8 @@ extern "C" void app_main() {
             pms.requestRead(); // Request data from the sensor
             if (pms.readUntil(data)) { // Read data until available
                 printf("PM2.5: %.dug/m3\nPM10.0: %.dug/m3\n", data.PM_AE_UG_2_5, data.PM_AE_UG_10_0);
+                Blynk.virtualWrite(V0, data.PM_AE_UG_2_5);
+                Blynk.virtualWrite(V1, data.PM_AE_UG_10_0);
             } else {
                 Serial.println("No data from PMS7003.");
             }
@@ -349,6 +366,7 @@ extern "C" void app_main() {
             MQ131.externalADCUpdate(voltageMQ131);
             float MQ131_PPM = MQ131.readSensor();
             printf("O3 Concentration: %.2fppm\n", MQ131_PPM);
+            Blynk.virtualWrite(V2, MQ131_PPM);
 
             ads.setSingleChannel(1);
             //for(int i=0; i<128; i++){ // counter is 32, conversion rate is 8 SPS --> 4s
@@ -360,12 +378,14 @@ extern "C" void app_main() {
             MQ7.externalADCUpdate(voltageMQ7);
             float MQ7_PPM = MQ7.readSensor();
             printf("CO Concentration: %.2fppm\n", MQ7_PPM);
+            Blynk.virtualWrite(V3, MQ7_PPM);
 
             // DHT22 task
             esp_err_t result = dht_read_float_data(DHT_TYPE_AM2301, DHT_GPIO, &humidity, &temperature); //DHT22
             // Check if reading is successful
             if (result == ESP_OK) {
                 printf("Temperature: %.1f*C, Humidity: %.1f%%\n", temperature, humidity);
+                Blynk.virtualWrite(V4, temperature);
             } else {
                 printf("Failed to read data from DHT22 sensor: %d\n", result);
             }
