@@ -12,16 +12,22 @@
 #include <ADS1115_WE.h>
 #include <WiFi.h>
 #include <WiFiClient.h>
-//#include <Blynk.h>
 #include <BlynkSimpleEsp32.h>
+
+char ssid[] = "Thach";
+char pass[] = "duyvi028";
 
 RTC_DS3231 rtc;
 char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
 
 #define PMS_RX_PIN GPIO_NUM_17  
-#define PMS_TX_PIN GPIO_NUM_16 
+#define PMS_TX_PIN GPIO_NUM_16
+PMS pms(Serial1); // Use Serial1 for PMS communication
+PMS::DATA data; 
 
 #define DHT_GPIO GPIO_NUM_27
+float humidity = 0;
+float temperature = 0;
 
 #define placa "ESP32"
 #define Voltage_Resolution 5
@@ -32,6 +38,18 @@ char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursd
 #define MQ7_type "MQ-7"
 #define RatioMQ131CleanAir 75
 #define RatioMQ7CleanAir 27.5
+MQUnifiedsensor MQ131(placa, Voltage_Resolution, ADC_Bit_Resolution, MQ131_pin, MQ131_type);
+MQUnifiedsensor MQ7(placa, Voltage_Resolution, ADC_Bit_Resolution, MQ7_pin, MQ7_type);
+
+// Conversion constants
+#define CONVERSION_FACTOR 0.0409
+#define MG_TO_UG 1000.0  // 1 mg = 1000 µg
+float CO_MWEIGHT = 28.01;   // Carbon monoxide
+float O3_MWEIGHT = 48.00;   // Ozone
+// Function to convert PPM to µg/m³
+float ppm_to_ugm3(double ppm, double molecular_weight) {
+    return CONVERSION_FACTOR * ppm * molecular_weight * MG_TO_UG;
+}
 
 #define REASSIGN_PINS
 int sck = GPIO_NUM_18;
@@ -45,35 +63,11 @@ int cs = GPIO_NUM_5;
 #define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
-// Conversion constants
-#define CONVERSION_FACTOR 0.0409
-#define MG_TO_UG 1000.0  // 1 mg = 1000 µg
-
-char ssid[] = "Thach";
-char pass[] = "duyvi028";
-
-PMS pms(Serial1); // Use Serial1 for PMS communication
-PMS::DATA data;
-
-float humidity = 0;
-float temperature = 0;
-
-MQUnifiedsensor MQ131(placa, Voltage_Resolution, ADC_Bit_Resolution, MQ131_pin, MQ131_type);
-MQUnifiedsensor MQ7(placa, Voltage_Resolution, ADC_Bit_Resolution, MQ7_pin, MQ7_type);
-
 ADS1115_WE ads(0x48);
 
 // Timing variables
 unsigned long previousMillis = 0;
 const long interval = 10000; // Interval for reading sensors and logging data
-
-// Function to convert PPM to µg/m³
-float ppm_to_ugm3(double ppm, double molecular_weight) {
-    return CONVERSION_FACTOR * ppm * molecular_weight * MG_TO_UG;
-}
-
-float CO_MWEIGHT = 28.01;   // Carbon monoxide
-float O3_MWEIGHT = 48.00;   // Ozone
 
 void readFile(fs::FS &fs, const char *path) {
     Serial.printf("Reading file: %s\n", path);
@@ -264,7 +258,7 @@ extern "C" void app_main() {
     // Explanation: 
     // In this routine the sensor will measure the resistance of the sensor supposedly before being pre-heated
     // and on clean air (Calibration conditions), setting up R0 value.
-    // We recomend executing this routine only on setup in laboratory conditions.
+    // We recommend executing this routine only on setup in laboratory conditions.
     // This routine does not need to be executed on each restart, you can load your R0 value from eeprom.
     // Acknowledgements: https://jayconsystems.com/blog/understanding-a-gas-sensor
     Serial.print("Calibrating please wait.");
@@ -276,17 +270,17 @@ extern "C" void app_main() {
             ads.startSingleMeasurement();
             while(ads.isBusy()){delay(0);}
         //}
-        float voltager0MQ131 = ads.getResult_V(); // Get voltage in volts
-        printf("MQ131 Voltage: %f\n", voltager0MQ131);
-        MQ131.externalADCUpdate(voltager0MQ131);
+        float voltageR0MQ131 = ads.getResult_V(); // Get voltage in volts
+        printf("MQ131 Voltage: %f\n", voltageR0MQ131);
+        MQ131.externalADCUpdate(voltageR0MQ131);
         calc131R0 += MQ131.calibrate(RatioMQ131CleanAir);
         Serial.print(".");
     }
     MQ131.setR0(calc131R0/10);
     printf("R0_131 after: %f\n", calc131R0);
     Serial.println("  done!.");
-    if(isinf(calc131R0)) {Serial.println("Warning: Conection issue, R0 is infinite (Open circuit detected) please check your wiring and supply"); while(1);}
-    if(calc131R0 == 0){Serial.println("Warning: Conection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply"); while(1);}
+    if(isinf(calc131R0)) {Serial.println("Warning: Connection issue, R0 is infinite (Open circuit detected) please check your wiring and supply"); while(1);}
+    if(calc131R0 == 0){Serial.println("Warning: Connection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply"); while(1);}
     MQ131.serialDebug(true);
     Serial.println("Ignore Ratio = RS/R0, for this example we will use readSensorR0Rs, the ratio calculated will be R0/Rs. Thanks :)");
 
@@ -298,16 +292,16 @@ extern "C" void app_main() {
             ads.startSingleMeasurement();
             while(ads.isBusy()){delay(0);}
         //}
-        float voltager0MQ7 = ads.getResult_V(); // Get voltage in volts
-        printf("MQ7 Voltage: %f\n", voltager0MQ7);
-        MQ7.externalADCUpdate(voltager0MQ7);
+        float voltageR0MQ7 = ads.getResult_V(); // Get voltage in volts
+        printf("MQ7 Voltage: %f\n", voltageR0MQ7);
+        MQ7.externalADCUpdate(voltageR0MQ7);
         calc7R0 += MQ7.calibrate(RatioMQ7CleanAir);
         Serial.print(".");
     }
     MQ7.setR0(calc7R0/10);
     Serial.println("  done!.");
-    if(isinf(calc7R0)) {Serial.println("Warning: Conection issue, R0 is infinite (Open circuit detected) please check your wiring and supply"); while(1);}
-    if(calc7R0 == 0){Serial.println("Warning: Conection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply"); while(1);}
+    if(isinf(calc7R0)) {Serial.println("Warning: Connection issue, R0 is infinite (Open circuit detected) please check your wiring and supply"); while(1);}
+    if(calc7R0 == 0){Serial.println("Warning: Connection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply"); while(1);}
     MQ7.serialDebug(true);
 
     // Check if the log file exists
