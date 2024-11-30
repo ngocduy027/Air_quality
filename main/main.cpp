@@ -164,6 +164,9 @@ void rtc_task(void *pvParameter) {
             Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
 
             xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+            if (completedTasks == 0) {
+                xSemaphoreTake(resultSemaphore, portMAX_DELAY);
+            }
             if (++completedTasks >= 5) {  // All 5 sensor tasks completed
                 completedTasks = 0;
                 xSemaphoreGive(resultSemaphore);  // Allow display task to run
@@ -195,6 +198,9 @@ void pms_task(void *pvParameter) {
             Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
 
             xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+            if (completedTasks == 0) {
+                xSemaphoreTake(resultSemaphore, portMAX_DELAY);
+            }
             if (++completedTasks >= 5) {  // All 5 sensor tasks completed
                 completedTasks = 0;
                 xSemaphoreGive(resultSemaphore);  // Allow display task to run
@@ -226,6 +232,9 @@ void mq131_task(void *pvParameter) {
             Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
 
             xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+            if (completedTasks == 0) {
+                xSemaphoreTake(resultSemaphore, portMAX_DELAY);
+            }
             if (++completedTasks >= 5) {  // All 5 sensor tasks completed
                 completedTasks = 0;
                 xSemaphoreGive(resultSemaphore);  // Allow display task to run
@@ -256,6 +265,9 @@ void mq7_task(void *pvParameter) {
             Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
 
             xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+            if (completedTasks == 0) {
+                xSemaphoreTake(resultSemaphore, portMAX_DELAY);
+            }
             if (++completedTasks >= 5) {  // All 5 sensor tasks completed
                 completedTasks = 0;
                 xSemaphoreGive(resultSemaphore);  // Allow display task to run
@@ -284,6 +296,9 @@ void dht_task(void *pvParameter) {
             Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
 
             xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+            if (completedTasks == 0) {
+                xSemaphoreTake(resultSemaphore, portMAX_DELAY);
+            }
             if (++completedTasks >= 5) {  // All 5 sensor tasks completed
                 completedTasks = 0;
                 xSemaphoreGive(resultSemaphore);  // Allow display task to run
@@ -356,7 +371,7 @@ void log_task(void *pvParameter) {
                 
                 // Clear the queue
                 xQueueReset(sensorDataQueue);
-                xSemaphoreGive(taskSemaphore);
+                xSemaphoreGive(resultSemaphore);
             }
         }
         vTaskDelay(5000 / portTICK_PERIOD_MS);
@@ -554,6 +569,7 @@ extern "C" void app_main() {
         Serial.println("Failed to create result semaphores");
         return;
     }
+    xSemaphoreGive(resultSemaphore);
 
     Blynk.run();
 
