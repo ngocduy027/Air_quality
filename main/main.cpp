@@ -7,6 +7,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <freertos/queue.h>
 #include <esp_system.h>
 #include <RTClib.h>
 #include <PMS.h>
@@ -24,17 +25,11 @@ char pass[] = "duyvi028";
 
 RTC_DS3231 rtc;
 char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
-uint8_t current_day, current_month, current_hour, current_minute, current_second;
-uint16_t current_year;
 
 #define PMS_RX_PIN GPIO_NUM_17  
 #define PMS_TX_PIN GPIO_NUM_16
 PMS pms(Serial1); // Use Serial1 for PMS communication
 PMS::DATA data; 
-
-#define DHT_GPIO GPIO_NUM_27
-float humidity;
-float temperature;
 
 #define placa "ESP32"
 #define Voltage_Resolution 5
@@ -47,20 +42,18 @@ float temperature;
 #define RatioMQ7CleanAir 27.5
 MQUnifiedsensor MQ131(placa, Voltage_Resolution, ADC_Bit_Resolution, MQ131_pin, MQ131_type);
 MQUnifiedsensor MQ7(placa, Voltage_Resolution, ADC_Bit_Resolution, MQ7_pin, MQ7_type);
-float MQ131_PPM;
-float MQ7_PPM;
 
 // Conversion constants
 #define CONVERSION_FACTOR 0.0409
 #define MG_TO_UG 1000.0  // 1 mg = 1000 µg
 float CO_MWEIGHT = 28.01;  
 float O3_MWEIGHT = 48.00; 
-float converted_MQ131_PPM;
-float converted_MQ7_PPM;  
 // Function to convert PPM to µg/m³
 float ppm_to_ugm3(double ppm, double molecular_weight) {
     return CONVERSION_FACTOR * ppm * molecular_weight * MG_TO_UG;
 }
+
+#define DHT_GPIO GPIO_NUM_27
 
 #define REASSIGN_PINS
 int sck = GPIO_NUM_18;
@@ -76,7 +69,28 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 ADS1115_WE ads(0x48);
 
+QueueHandle_t sensorDataQueue;
 SemaphoreHandle_t taskSemaphore;
+SemaphoreHandle_t resultSemaphore;
+static uint8_t completedTasks = 0;
+
+typedef struct {
+    uint8_t current_day;
+    uint8_t current_month;
+    uint8_t current_hour;
+    uint8_t current_minute;
+    uint8_t current_second;
+    uint16_t current_year;
+    uint16_t PM_AE_UG_2_5;
+    uint16_t PM_AE_UG_10_0;
+    float MQ131_PPM;
+    float MQ7_PPM;
+    float converted_MQ131_PPM;
+    float converted_MQ7_PPM;  
+    float humidity;
+    float temperature;
+} SensorsData;
+SensorsData dataUpdate;
 
 void writeFile(fs::FS &fs, const char *path, const char *message) {
     Serial.printf("Writing file: %s\n", path);
@@ -133,21 +147,27 @@ void rtc_task(void *pvParameter) {
         if (xSemaphoreTake(taskSemaphore, portMAX_DELAY) == pdTRUE) {
             // DS3231 task
             DateTime now = rtc.now();
-            current_day = now.day();
-            current_month = now.month();
-            current_year = now.year();
-            current_hour = now.hour();
-            current_minute = now.minute();
-            current_second = now.second();
+            dataUpdate.current_day = now.day();
+            dataUpdate.current_month = now.month();
+            dataUpdate.current_year = now.year();
+            dataUpdate.current_hour = now.hour();
+            dataUpdate.current_minute = now.minute();
+            dataUpdate.current_second = now.second();
             printf("%s, %d/%d/%d %02d:%02d:%02d\n",
-            daysOfTheWeek[now.dayOfTheWeek()],  
-            current_day, current_month, current_year,
-            current_hour, current_minute, current_second);
+                    daysOfTheWeek[now.dayOfTheWeek()],  
+                    dataUpdate.current_day, dataUpdate.current_month, dataUpdate.current_year,
+                    dataUpdate.current_hour, dataUpdate.current_minute, dataUpdate.current_second);
+            
             // Check the stack high watermark
             UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-            
             // Log or print the high watermark
             Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
+
+            xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+            if (++completedTasks >= 5) {  // All 5 sensor tasks completed
+                completedTasks = 0;
+                xSemaphoreGive(resultSemaphore);  // Allow display task to run
+            }
             xSemaphoreGive(taskSemaphore);
         }
         vTaskDelay(5000 / portTICK_PERIOD_MS);
@@ -160,17 +180,25 @@ void pms_task(void *pvParameter) {
             // PMS7003 task
             pms.requestRead(); // Request data from the sensor
             if (pms.readUntil(data)) { // Read data until available
-                printf("PM2.5: %.dug/m3\nPM10.0: %.dug/m3\n", data.PM_AE_UG_2_5, data.PM_AE_UG_10_0);
-                Blynk.virtualWrite(V0, data.PM_AE_UG_2_5);
-                Blynk.virtualWrite(V1, data.PM_AE_UG_10_0);
+                dataUpdate.PM_AE_UG_2_5 = data.PM_AE_UG_2_5;
+                dataUpdate.PM_AE_UG_10_0 = data.PM_AE_UG_10_0;
+                printf("PM2.5: %.dug/m3\nPM10.0: %.dug/m3\n", dataUpdate.PM_AE_UG_2_5, dataUpdate.PM_AE_UG_10_0);
+                Blynk.virtualWrite(V0, dataUpdate.PM_AE_UG_2_5);
+                Blynk.virtualWrite(V1, dataUpdate.PM_AE_UG_10_0);
             } else {
                 Serial.println("No data from PMS7003.");
             }
+
             // Check the stack high watermark
             UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-            
             // Log or print the high watermark
             Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
+
+            xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+            if (++completedTasks >= 5) {  // All 5 sensor tasks completed
+                completedTasks = 0;
+                xSemaphoreGive(resultSemaphore);  // Allow display task to run
+            }
             xSemaphoreGive(taskSemaphore);
         }
         vTaskDelay(5000 / portTICK_PERIOD_MS);
@@ -187,15 +215,21 @@ void mq131_task(void *pvParameter) {
             float voltageMQ131 = ads.getResult_V(); // Get voltage in volts
             printf("MQ131 Voltage: %fmV\n", voltageMQ131);
             MQ131.externalADCUpdate(voltageMQ131);
-            MQ131_PPM = MQ131.readSensor();
-            printf("O3 Concentration: %.2fppm\n", MQ131_PPM);
-            converted_MQ131_PPM = ppm_to_ugm3(MQ131_PPM, O3_MWEIGHT);
-            Blynk.virtualWrite(V2, MQ131_PPM);
+            dataUpdate.MQ131_PPM = MQ131.readSensor();
+            printf("O3 Concentration: %.2fppm\n", dataUpdate.MQ131_PPM);
+            dataUpdate.converted_MQ131_PPM = ppm_to_ugm3(dataUpdate.MQ131_PPM, O3_MWEIGHT);
+            Blynk.virtualWrite(V2, dataUpdate.MQ131_PPM);
+
             // Check the stack high watermark
             UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-            
             // Log or print the high watermark
             Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
+
+            xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+            if (++completedTasks >= 5) {  // All 5 sensor tasks completed
+                completedTasks = 0;
+                xSemaphoreGive(resultSemaphore);  // Allow display task to run
+            }
             xSemaphoreGive(taskSemaphore);
         }
         vTaskDelay(5000 / portTICK_PERIOD_MS);
@@ -211,15 +245,21 @@ void mq7_task(void *pvParameter) {
             float voltageMQ7 = ads.getResult_V(); // Get voltage in volts
             printf("MQ7 Voltage: %fmV\n", voltageMQ7);
             MQ7.externalADCUpdate(voltageMQ7);
-            MQ7_PPM = MQ7.readSensor();
-            printf("CO Concentration: %.2fppm\n", MQ7_PPM);
-            converted_MQ7_PPM = ppm_to_ugm3(MQ7_PPM, CO_MWEIGHT);
-            Blynk.virtualWrite(V3, MQ7_PPM);
+            dataUpdate.MQ7_PPM = MQ7.readSensor();
+            printf("CO Concentration: %.2fppm\n", dataUpdate.MQ7_PPM);
+            dataUpdate.converted_MQ7_PPM = ppm_to_ugm3(dataUpdate.MQ7_PPM, CO_MWEIGHT);
+            Blynk.virtualWrite(V3, dataUpdate.MQ7_PPM);
+
             // Check the stack high watermark
             UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-            
             // Log or print the high watermark
             Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
+
+            xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+            if (++completedTasks >= 5) {  // All 5 sensor tasks completed
+                completedTasks = 0;
+                xSemaphoreGive(resultSemaphore);  // Allow display task to run
+            }
             xSemaphoreGive(taskSemaphore);
         }
         vTaskDelay(5000 / portTICK_PERIOD_MS);
@@ -230,18 +270,24 @@ void dht_task(void *pvParameter) {
     while(true) {
         if (xSemaphoreTake(taskSemaphore, portMAX_DELAY) == pdTRUE) {
             // DHT22 task
-            esp_err_t result = dht_read_float_data(DHT_TYPE_AM2301, DHT_GPIO, &humidity, &temperature);
+            esp_err_t result = dht_read_float_data(DHT_TYPE_AM2301, DHT_GPIO, &dataUpdate.humidity, &dataUpdate.temperature);
             if (result == ESP_OK) {
-                printf("Temperature: %.1f*C, Humidity: %.1f%%\n", temperature, humidity);
-                Blynk.virtualWrite(V4, temperature);
+                printf("Temperature: %.1f*C, Humidity: %.1f%%\n", dataUpdate.temperature, dataUpdate.humidity);
+                Blynk.virtualWrite(V4, dataUpdate.temperature);
             } else {
                 printf("Failed to read data from DHT22 sensor: %d\n", result);
             }
+
             // Check the stack high watermark
             UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-            
             // Log or print the high watermark
             Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
+
+            xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+            if (++completedTasks >= 5) {  // All 5 sensor tasks completed
+                completedTasks = 0;
+                xSemaphoreGive(resultSemaphore);  // Allow display task to run
+            }
             xSemaphoreGive(taskSemaphore);
         }
         vTaskDelay(5000 / portTICK_PERIOD_MS);
@@ -250,30 +296,38 @@ void dht_task(void *pvParameter) {
 
 void display_task(void *pvParameter) {
     while (true) {
-        if (xSemaphoreTake(taskSemaphore, portMAX_DELAY) == pdTRUE) {
-            // Update the OLED display with sensor data
-            display.clearDisplay(); 
-            display.setTextSize(2); 
-            display.setTextColor(SSD1306_WHITE); 
-            display.setCursor(0, 0); // Start at top-left corner
+        if (xSemaphoreTake(resultSemaphore, portMAX_DELAY) == pdTRUE) {
+            if (xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY) == pdTRUE) {
+                xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+                xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+                xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+                xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+                // Update the OLED display with sensor data
+                display.clearDisplay(); 
+                display.setTextSize(2); 
+                display.setTextColor(SSD1306_WHITE); 
+                display.setCursor(0, 0); // Start at top-left corner
 
-            // Display sensors data
-            display.println("AirQuality");
-            display.setTextSize(1);
-            display.printf("PM2.5: %.dug/m3\n", data.PM_AE_UG_2_5);
-            display.printf("PM10.0: %.dug/m3\n", data.PM_AE_UG_10_0);
-            display.printf("O3: %.2fPPM\n", MQ131_PPM);
-            display.printf("CO: %.2fPPM\n", MQ7_PPM);
-            display.printf("Temp: %.1f*C\n", temperature);
-            display.printf("Humid: %.1f%%\n", humidity);
+                // Display sensors data
+                display.println("AirQuality");
+                display.setTextSize(1);
+                display.printf("PM2.5: %.dug/m3\n", dataUpdate.PM_AE_UG_2_5);
+                display.printf("PM10.0: %.dug/m3\n", dataUpdate.PM_AE_UG_10_0);
+                display.printf("O3: %.2fPPM\n", dataUpdate.MQ131_PPM);
+                display.printf("CO: %.2fPPM\n", dataUpdate.MQ7_PPM);
+                display.printf("Temp: %.1f*C\n", dataUpdate.temperature);
+                display.printf("Humid: %.1f%%\n", dataUpdate.humidity);
 
-            display.display(); // Show the display buffer on the screen
-            // Check the stack high watermark
-            UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-            
-            // Log or print the high watermark
-            Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
-            xSemaphoreGive(taskSemaphore);
+                display.display(); // Show the display buffer on the screen
+                
+                // Check the stack high watermark
+                UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
+                // Log or print the high watermark
+                Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
+
+                xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+                xSemaphoreGive(resultSemaphore);
+            }
         }
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
@@ -281,23 +335,29 @@ void display_task(void *pvParameter) {
 
 void log_task(void *pvParameter) {
     while(true) {
-        if (xSemaphoreTake(taskSemaphore, portMAX_DELAY) == pdTRUE) {
-            // Concatenate all data into a single string for logging
-            char logEntry[200];
-            sprintf(logEntry, "%d/%d/%d,%02d:%02d:%02d,%.d,%.d,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f",
-                    current_day, current_month, current_year,
-                    current_hour, current_minute, current_second,
-                    data.PM_AE_UG_2_5, data.PM_AE_UG_10_0,
-                    MQ131_PPM, MQ7_PPM,
-                    converted_MQ131_PPM, converted_MQ7_PPM,
-                    temperature, humidity);
-            logData(logEntry); // Log the concatenated data
-            // Check the stack high watermark
-            UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-            
-            // Log or print the high watermark
-            Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
-            xSemaphoreGive(taskSemaphore);
+        if (xSemaphoreTake(resultSemaphore, portMAX_DELAY) == pdTRUE) {
+            // Receive data from the queue
+            if (xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY) == pdTRUE) {
+                // Concatenate all data into a single string for logging
+                char logEntry[200];
+                sprintf(logEntry, "%d/%d/%d,%02d:%02d:%02d,%.d,%.d,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f",
+                        dataUpdate.current_day, dataUpdate.current_month, dataUpdate.current_year,
+                        dataUpdate.current_hour, dataUpdate.current_minute, dataUpdate.current_second,
+                        dataUpdate.PM_AE_UG_2_5, dataUpdate.PM_AE_UG_10_0,
+                        dataUpdate.MQ131_PPM, dataUpdate.MQ7_PPM,
+                        dataUpdate.converted_MQ131_PPM, dataUpdate.converted_MQ7_PPM,
+                        dataUpdate.temperature, dataUpdate.humidity);
+                logData(logEntry); // Log the concatenated data
+
+                // Check the stack high watermark
+                UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
+                // Log or print the high watermark
+                Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
+                
+                // Clear the queue
+                xQueueReset(sensorDataQueue);
+                xSemaphoreGive(taskSemaphore);
+            }
         }
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
@@ -380,8 +440,6 @@ extern "C" void app_main() {
         // rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
     }
 
-    DateTime now = rtc.now();
-
     // Initialize PMS7003
     pms.passiveMode();
 
@@ -424,8 +482,14 @@ extern "C" void app_main() {
     MQ131.setR0(calc131R0/10);
     printf("R0_131 after: %f\n", calc131R0);
     Serial.println("  done!.");
-    if(isinf(calc131R0)) {Serial.println("Warning: Connection issue, R0 is infinite (Open circuit detected) please check your wiring and supply"); while(1);}
-    if(calc131R0 == 0){Serial.println("Warning: Connection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply"); while(1);}
+    if(isinf(calc131R0)) {
+        Serial.println("Warning: Connection issue, R0 is infinite (Open circuit detected) please check your wiring and supply");
+        while(1);
+    }
+    if(calc131R0 == 0) {
+        Serial.println("Warning: Connection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply");
+        while(1);
+    }
     MQ131.serialDebug(true);
 
     MQ7.setRegressionMethod(1);
@@ -452,8 +516,14 @@ extern "C" void app_main() {
     }
     MQ7.setR0(calc7R0/10);
     Serial.println("  done!.");
-    if(isinf(calc7R0)) {Serial.println("Warning: Connection issue, R0 is infinite (Open circuit detected) please check your wiring and supply"); while(1);}
-    if(calc7R0 == 0){Serial.println("Warning: Connection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply"); while(1);}
+    if(isinf(calc7R0)) {
+        Serial.println("Warning: Connection issue, R0 is infinite (Open circuit detected) please check your wiring and supply");
+        while(1);
+    }
+    if(calc7R0 == 0) {
+        Serial.println("Warning: Connection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply");
+        while(1);
+    }
     MQ7.serialDebug(true);
 
     // Initialize the OLED display
@@ -465,23 +535,33 @@ extern "C" void app_main() {
 
     vTaskDelay(5000 / portTICK_PERIOD_MS); //Wait to stabilize sensors for reading
 
+    // Create the queue
+    sensorDataQueue = xQueueCreate(5, sizeof(SensorsData));
+    if (sensorDataQueue == NULL) {
+        Serial.println("Failed to create sensor data queue");
+        return;
+    }
+    
     // Create the semaphore
-    taskSemaphore = xSemaphoreCreateBinary();
+    taskSemaphore = xSemaphoreCreateCounting(5, 5);
     if (taskSemaphore == NULL) {
-        Serial.println("Failed to create semaphore");
+        Serial.println("Failed to create task semaphore");
         return;
     }
 
-    // Give the semaphore initially to allow the first task to run
-    xSemaphoreGive(taskSemaphore);
+    resultSemaphore = xSemaphoreCreateBinary();
+    if (resultSemaphore == NULL) {
+        Serial.println("Failed to create result semaphores");
+        return;
+    }
 
     Blynk.run();
 
-    xTaskCreate(&rtc_task, "rtc_task", 2048, NULL, 5, NULL);
-    xTaskCreate(&pms_task, "pms_task", 3072, NULL, 5, NULL);
-    xTaskCreate(&mq131_task, "mq131_task", 3072, NULL, 5, NULL);
-    xTaskCreate(&mq7_task, "mq7_task", 3072, NULL, 5, NULL);
-    xTaskCreate(&dht_task, "dht_task", 3072, NULL, 5, NULL);
-    xTaskCreate(&display_task, "display_task", 2432, NULL, 5, NULL);
-    xTaskCreate(&log_task, "log_task", 2688, NULL, 4, NULL);
+    xTaskCreate(&rtc_task, "rtc_task", 2048, NULL, 3, NULL);
+    xTaskCreate(&pms_task, "pms_task", 3072, NULL, 3, NULL);
+    xTaskCreate(&mq131_task, "mq131_task", 3072, NULL, 3, NULL);
+    xTaskCreate(&mq7_task, "mq7_task", 3072, NULL, 3, NULL);
+    xTaskCreate(&dht_task, "dht_task", 3072, NULL, 3, NULL);
+    xTaskCreate(&display_task, "display_task", 2432, NULL, 2, NULL);
+    xTaskCreate(&log_task, "log_task", 2688, NULL, 1, NULL);
 }
