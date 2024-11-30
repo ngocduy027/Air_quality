@@ -3,6 +3,11 @@
 #define BLYNK_AUTH_TOKEN "8o6SipbVqZJVbJrYZCickzBm5d78dnN0"
 
 #include <Arduino.h>
+#include <stdio.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/semphr.h>
+#include <esp_system.h>
 #include <RTClib.h>
 #include <PMS.h>
 #include <dht.h>
@@ -19,6 +24,8 @@ char pass[] = "duyvi028";
 
 RTC_DS3231 rtc;
 char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
+uint8_t current_day, current_month, current_hour, current_minute, current_second;
+uint16_t current_year;
 
 #define PMS_RX_PIN GPIO_NUM_17  
 #define PMS_TX_PIN GPIO_NUM_16
@@ -26,8 +33,8 @@ PMS pms(Serial1); // Use Serial1 for PMS communication
 PMS::DATA data; 
 
 #define DHT_GPIO GPIO_NUM_27
-float humidity = 0;
-float temperature = 0;
+float humidity;
+float temperature;
 
 #define placa "ESP32"
 #define Voltage_Resolution 5
@@ -40,12 +47,16 @@ float temperature = 0;
 #define RatioMQ7CleanAir 27.5
 MQUnifiedsensor MQ131(placa, Voltage_Resolution, ADC_Bit_Resolution, MQ131_pin, MQ131_type);
 MQUnifiedsensor MQ7(placa, Voltage_Resolution, ADC_Bit_Resolution, MQ7_pin, MQ7_type);
+float MQ131_PPM;
+float MQ7_PPM;
 
 // Conversion constants
 #define CONVERSION_FACTOR 0.0409
 #define MG_TO_UG 1000.0  // 1 mg = 1000 µg
-float CO_MWEIGHT = 28.01;   // Carbon monoxide
-float O3_MWEIGHT = 48.00;   // Ozone
+float CO_MWEIGHT = 28.01;  
+float O3_MWEIGHT = 48.00; 
+float converted_MQ131_PPM;
+float converted_MQ7_PPM;  
 // Function to convert PPM to µg/m³
 float ppm_to_ugm3(double ppm, double molecular_weight) {
     return CONVERSION_FACTOR * ppm * molecular_weight * MG_TO_UG;
@@ -65,23 +76,7 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
 ADS1115_WE ads(0x48);
 
-// Timing variables
-unsigned long previousMillis = 0;
-const long interval = 10000; // Interval for reading sensors and logging data
-
-void readFile(fs::FS &fs, const char *path) {
-    Serial.printf("Reading file: %s\n", path);
-    File file = fs.open(path);
-    if (!file) {
-        Serial.println("Failed to open file for reading");
-        return;
-    }
-    Serial.print("Read from file: ");
-    while (file.available()) {
-        Serial.write(file.read());
-    }
-    file.close();
-}
+SemaphoreHandle_t taskSemaphore;
 
 void writeFile(fs::FS &fs, const char *path, const char *message) {
     Serial.printf("Writing file: %s\n", path);
@@ -113,24 +108,6 @@ void appendFile(fs::FS &fs, const char *path, const char *message) {
     file.close();
 }
 
-void renameFile(fs::FS &fs, const char *path1, const char *path2) {
-    Serial.printf("Renaming file %s to %s\n", path1, path2);
-    if (fs.rename(path1, path2)) {
-        Serial.println("File renamed");
-    } else {
-        Serial.println("Rename failed");
-    }
-}
-
-void deleteFile(fs::FS &fs, const char *path) {
-    Serial.printf("Deleting file: %s\n", path);
-    if (fs.remove(path)) {
-        Serial.println("File deleted");
-    } else {
-        Serial.println("Delete failed");
-    }
-}
-
 void logData(const char* data) {
     // Open the log file in append mode
     File logFile = SD.open("/aq_log.csv", FILE_APPEND);
@@ -151,6 +128,181 @@ void logData(const char* data) {
     logFile.close();
 }
 
+void rtc_task(void *pvParameter) {
+    while(true) {
+        if (xSemaphoreTake(taskSemaphore, portMAX_DELAY) == pdTRUE) {
+            // DS3231 task
+            DateTime now = rtc.now();
+            current_day = now.day();
+            current_month = now.month();
+            current_year = now.year();
+            current_hour = now.hour();
+            current_minute = now.minute();
+            current_second = now.second();
+            printf("%s, %d/%d/%d %02d:%02d:%02d\n",
+            daysOfTheWeek[now.dayOfTheWeek()],  
+            current_day, current_month, current_year,
+            current_hour, current_minute, current_second);
+            // Check the stack high watermark
+            UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
+            
+            // Log or print the high watermark
+            Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
+            xSemaphoreGive(taskSemaphore);
+        }
+        vTaskDelay(5000 / portTICK_PERIOD_MS);
+    }
+}
+
+void pms_task(void *pvParameter) {
+    while(true) {
+        if (xSemaphoreTake(taskSemaphore, portMAX_DELAY) == pdTRUE) {
+            // PMS7003 task
+            pms.requestRead(); // Request data from the sensor
+            if (pms.readUntil(data)) { // Read data until available
+                printf("PM2.5: %.dug/m3\nPM10.0: %.dug/m3\n", data.PM_AE_UG_2_5, data.PM_AE_UG_10_0);
+                Blynk.virtualWrite(V0, data.PM_AE_UG_2_5);
+                Blynk.virtualWrite(V1, data.PM_AE_UG_10_0);
+            } else {
+                Serial.println("No data from PMS7003.");
+            }
+            // Check the stack high watermark
+            UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
+            
+            // Log or print the high watermark
+            Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
+            xSemaphoreGive(taskSemaphore);
+        }
+        vTaskDelay(5000 / portTICK_PERIOD_MS);
+    }
+}
+
+void mq131_task(void *pvParameter) {
+    while(true) {
+        if (xSemaphoreTake(taskSemaphore, portMAX_DELAY) == pdTRUE) {
+            // MQ sensors task
+            ads.setSingleChannel(0);
+            ads.startSingleMeasurement();
+            while(ads.isBusy()){delay(0);}
+            float voltageMQ131 = ads.getResult_V(); // Get voltage in volts
+            printf("MQ131 Voltage: %fmV\n", voltageMQ131);
+            MQ131.externalADCUpdate(voltageMQ131);
+            MQ131_PPM = MQ131.readSensor();
+            printf("O3 Concentration: %.2fppm\n", MQ131_PPM);
+            converted_MQ131_PPM = ppm_to_ugm3(MQ131_PPM, O3_MWEIGHT);
+            Blynk.virtualWrite(V2, MQ131_PPM);
+            // Check the stack high watermark
+            UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
+            
+            // Log or print the high watermark
+            Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
+            xSemaphoreGive(taskSemaphore);
+        }
+        vTaskDelay(5000 / portTICK_PERIOD_MS);
+    }
+}
+
+void mq7_task(void *pvParameter) {
+    while(true) {
+        if (xSemaphoreTake(taskSemaphore, portMAX_DELAY) == pdTRUE) {
+            ads.setSingleChannel(1);
+            ads.startSingleMeasurement();
+            while(ads.isBusy()){delay(0);}
+            float voltageMQ7 = ads.getResult_V(); // Get voltage in volts
+            printf("MQ7 Voltage: %fmV\n", voltageMQ7);
+            MQ7.externalADCUpdate(voltageMQ7);
+            MQ7_PPM = MQ7.readSensor();
+            printf("CO Concentration: %.2fppm\n", MQ7_PPM);
+            converted_MQ7_PPM = ppm_to_ugm3(MQ7_PPM, CO_MWEIGHT);
+            Blynk.virtualWrite(V3, MQ7_PPM);
+            // Check the stack high watermark
+            UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
+            
+            // Log or print the high watermark
+            Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
+            xSemaphoreGive(taskSemaphore);
+        }
+        vTaskDelay(5000 / portTICK_PERIOD_MS);
+    }
+}
+
+void dht_task(void *pvParameter) {
+    while(true) {
+        if (xSemaphoreTake(taskSemaphore, portMAX_DELAY) == pdTRUE) {
+            // DHT22 task
+            esp_err_t result = dht_read_float_data(DHT_TYPE_AM2301, DHT_GPIO, &humidity, &temperature);
+            if (result == ESP_OK) {
+                printf("Temperature: %.1f*C, Humidity: %.1f%%\n", temperature, humidity);
+                Blynk.virtualWrite(V4, temperature);
+            } else {
+                printf("Failed to read data from DHT22 sensor: %d\n", result);
+            }
+            // Check the stack high watermark
+            UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
+            
+            // Log or print the high watermark
+            Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
+            xSemaphoreGive(taskSemaphore);
+        }
+        vTaskDelay(5000 / portTICK_PERIOD_MS);
+    }
+}
+
+void display_task(void *pvParameter) {
+    while (true) {
+        if (xSemaphoreTake(taskSemaphore, portMAX_DELAY) == pdTRUE) {
+            // Update the OLED display with sensor data
+            display.clearDisplay(); 
+            display.setTextSize(2); 
+            display.setTextColor(SSD1306_WHITE); 
+            display.setCursor(0, 0); // Start at top-left corner
+
+            // Display sensors data
+            display.println("AirQuality");
+            display.setTextSize(1);
+            display.printf("PM2.5: %.dug/m3\n", data.PM_AE_UG_2_5);
+            display.printf("PM10.0: %.dug/m3\n", data.PM_AE_UG_10_0);
+            display.printf("O3: %.2fPPM\n", MQ131_PPM);
+            display.printf("CO: %.2fPPM\n", MQ7_PPM);
+            display.printf("Temp: %.1f*C\n", temperature);
+            display.printf("Humid: %.1f%%\n", humidity);
+
+            display.display(); // Show the display buffer on the screen
+            // Check the stack high watermark
+            UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
+            
+            // Log or print the high watermark
+            Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
+            xSemaphoreGive(taskSemaphore);
+        }
+        vTaskDelay(5000 / portTICK_PERIOD_MS);
+    }
+}
+
+void log_task(void *pvParameter) {
+    while(true) {
+        if (xSemaphoreTake(taskSemaphore, portMAX_DELAY) == pdTRUE) {
+            // Concatenate all data into a single string for logging
+            char logEntry[200];
+            sprintf(logEntry, "%d/%d/%d,%02d:%02d:%02d,%.d,%.d,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f",
+                    current_day, current_month, current_year,
+                    current_hour, current_minute, current_second,
+                    data.PM_AE_UG_2_5, data.PM_AE_UG_10_0,
+                    MQ131_PPM, MQ7_PPM,
+                    converted_MQ131_PPM, converted_MQ7_PPM,
+                    temperature, humidity);
+            logData(logEntry); // Log the concatenated data
+            // Check the stack high watermark
+            UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
+            
+            // Log or print the high watermark
+            Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
+            xSemaphoreGive(taskSemaphore);
+        }
+        vTaskDelay(5000 / portTICK_PERIOD_MS);
+    }
+}
+
 extern "C" void app_main() {
     initArduino(); // Initialize Arduino framework
 
@@ -165,23 +317,6 @@ extern "C" void app_main() {
     Serial.println("Serial and Serial1 initialized.");
 
     Blynk.begin(BLYNK_AUTH_TOKEN, ssid, pass);
-
-    // Initialize DS3231
-    if (! rtc.begin()) {
-        Serial.println("Couldn't find RTC");
-        Serial.flush();
-        while (1) delay(10);
-    }
-
-    if (rtc.lostPower()) {
-        Serial.println("RTC lost power, let's set the time!");
-        // When time needs to be set on a new device, or after a power loss, the
-        // following line sets the RTC to the date & time this sketch was compiled
-        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-        // This line sets the RTC with an explicit date & time, for example to set
-        // January 21, 2014 at 3am you would call:
-        // rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
-    }
 
     // Initialize SDCard
     #ifdef REASSIGN_PINS
@@ -216,20 +351,47 @@ extern "C" void app_main() {
     Serial.printf("Total space: %lluMB\n", SD.totalBytes() / (1024 * 1024));
     Serial.printf("Used space: %lluMB\n", SD.usedBytes() / (1024 * 1024));
 
-    // Initialize the OLED display
-    if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-        Serial.println(F("SSD1306 allocation failed"));
-        for(;;); // Don't proceed, loop forever
+    // Check if the log file exists
+    if (!SD.exists("/aq_log.csv")) {
+        Serial.println("Log file does not exist. Attempting to create it...");
+        // Attempt to create the file
+        writeFile(SD, "/aq_log.csv", "Date,Time,PM 2.5,PM 10.0,O3(PPM),CO(PPM),O3(ug/m3),CO(ug/m3),Temperature,Humidity\n");
     }
-    display.clearDisplay(); // Clear the display buffer
+    else{
+        printf("File existed!\n");
+    }
+
+    // Initialize DS3231
+    if (! rtc.begin()) {
+        Serial.println("Couldn't find RTC");
+        Serial.flush();
+        while (1) delay(10);
+    }
+
+    //rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+
+    if (rtc.lostPower()) {
+        Serial.println("RTC lost power, let's set the time!");
+        // When time needs to be set on a new device, or after a power loss, the
+        // following line sets the RTC to the date & time this sketch was compiled
+        rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+        // This line sets the RTC with an explicit date & time, for example to set
+        // January 21, 2014 at 3am you would call:
+        // rtc.adjust(DateTime(2014, 1, 21, 3, 0, 0));
+    }
+
+    DateTime now = rtc.now();
 
     // Initialize PMS7003
-    pms.passiveMode(); // Set the PMS to passive mode
+    pms.passiveMode();
 
     //Initiate ADS1115
     ads.init();
     if(!ads.init()){
         Serial.println("ADS1115 not connected!");
+    }
+    else{
+        Serial.println("ADS1115 initialized!");
     }
     ads.setVoltageRange_mV(ADS1115_RANGE_1024);
     ads.setConvRate(ADS1115_128_SPS);
@@ -239,37 +401,20 @@ extern "C" void app_main() {
     MQ131.setRegressionMethod(1);
     MQ131.setA(23.943);
     MQ131.setB(-1.11);
-    //MQ131.setA(110.47); MQ131.setB(-2.862);
     MQ131.init();
 
-    MQ7.setRegressionMethod(1);
-    MQ7.setA(99.042);
-    MQ7.setB(-1.518);
-    MQ7.init();
-
     /*//Set R0 manually
-    float MQ7_R0 = 22.64;
-    MQ7.setR0(MQ7_R0);
-    
     float MQ131_R0 = 12.93;
     MQ131.setR0(MQ131_R0);*/
 
     // Calibrate R0
-    // Explanation: 
-    // In this routine the sensor will measure the resistance of the sensor supposedly before being pre-heated
-    // and on clean air (Calibration conditions), setting up R0 value.
-    // We recommend executing this routine only on setup in laboratory conditions.
-    // This routine does not need to be executed on each restart, you can load your R0 value from eeprom.
-    // Acknowledgements: https://jayconsystems.com/blog/understanding-a-gas-sensor
     Serial.print("Calibrating please wait.");
     float calc131R0 = 0;
     printf("R0_131 before: %f\n", calc131R0);
     for(int i = 1; i<=10; i ++){
         ads.setSingleChannel(0);
-        //for(int i=0; i<128; i++){ // counter is 32, conversion rate is 8 SPS --> 4s
-            ads.startSingleMeasurement();
-            while(ads.isBusy()){delay(0);}
-        //}
+        ads.startSingleMeasurement();
+        while(ads.isBusy()){delay(0);}
         float voltageR0MQ131 = ads.getResult_V(); // Get voltage in volts
         printf("MQ131 Voltage: %f\n", voltageR0MQ131);
         MQ131.externalADCUpdate(voltageR0MQ131);
@@ -282,16 +427,23 @@ extern "C" void app_main() {
     if(isinf(calc131R0)) {Serial.println("Warning: Connection issue, R0 is infinite (Open circuit detected) please check your wiring and supply"); while(1);}
     if(calc131R0 == 0){Serial.println("Warning: Connection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply"); while(1);}
     MQ131.serialDebug(true);
-    Serial.println("Ignore Ratio = RS/R0, for this example we will use readSensorR0Rs, the ratio calculated will be R0/Rs. Thanks :)");
 
+    MQ7.setRegressionMethod(1);
+    MQ7.setA(99.042);
+    MQ7.setB(-1.518);
+    MQ7.init();
+
+    /*//Set R0 manually
+    float MQ7_R0 = 22.64;
+    MQ7.setR0(MQ7_R0);*/
+
+    // Calibrate R0
     Serial.print("Calibrating please wait.");
     float calc7R0 = 0;
     for(int i = 1; i<=10; i ++){
         ads.setSingleChannel(1);
-        //for(int i=0; i<128; i++){ // counter is 32, conversion rate is 8 SPS --> 4s
-            ads.startSingleMeasurement();
-            while(ads.isBusy()){delay(0);}
-        //}
+        ads.startSingleMeasurement();
+        while(ads.isBusy()){delay(0);}
         float voltageR0MQ7 = ads.getResult_V(); // Get voltage in volts
         printf("MQ7 Voltage: %f\n", voltageR0MQ7);
         MQ7.externalADCUpdate(voltageR0MQ7);
@@ -304,121 +456,32 @@ extern "C" void app_main() {
     if(calc7R0 == 0){Serial.println("Warning: Connection issue found, R0 is zero (Analog pin shorts to ground) please check your wiring and supply"); while(1);}
     MQ7.serialDebug(true);
 
-    // Check if the log file exists
-    if (!SD.exists("/aq_log.csv")) {
-        Serial.println("Log file does not exist. Attempting to create it...");
-        // Attempt to create the file
-        writeFile(SD, "/aq_log.csv", "Date,Time,PM 2.5,PM 10.0,O3(PPM),CO(PPM),O3(ug/m3),CO(ug/m3),Temperature,Humidity\n");
+    // Initialize the OLED display
+    if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+        Serial.println(F("SSD1306 allocation failed"));
+        for(;;); // Don't proceed, loop forever
     }
-    else{
-        printf("File existed!\n");
+    display.clearDisplay(); // Clear the display buffer
+
+    vTaskDelay(5000 / portTICK_PERIOD_MS); //Wait to stabilize sensors for reading
+
+    // Create the semaphore
+    taskSemaphore = xSemaphoreCreateBinary();
+    if (taskSemaphore == NULL) {
+        Serial.println("Failed to create semaphore");
+        return;
     }
-    
-    vTaskDelay(5000 / portTICK_PERIOD_MS);
 
-    while (true) {
-        Blynk.run();
-        
-        unsigned long currentMillis = millis();
+    // Give the semaphore initially to allow the first task to run
+    xSemaphoreGive(taskSemaphore);
 
-        if (currentMillis - previousMillis >= interval) {
-            previousMillis = currentMillis;
-            //Wake up PMS7003 before reading
-            //pms.wakeUp();
-            //delay(3000);
-            
-            // DS3231 task
-            DateTime now = rtc.now();
-            printf("%s, %d/%d/%d %02d:%02d:%02d\n",
-            daysOfTheWeek[now.dayOfTheWeek()],  
-            now.day(), 
-            now.month(), 
-            now.year(), 
-            now.hour(), 
-            now.minute(), 
-            now.second());
+    Blynk.run();
 
-            // PMS7003 task
-            pms.requestRead(); // Request data from the sensor
-            if (pms.readUntil(data)) { // Read data until available
-                printf("PM2.5: %.dug/m3\nPM10.0: %.dug/m3\n", data.PM_AE_UG_2_5, data.PM_AE_UG_10_0);
-                Blynk.virtualWrite(V0, data.PM_AE_UG_2_5);
-                Blynk.virtualWrite(V1, data.PM_AE_UG_10_0);
-            } else {
-                Serial.println("No data from PMS7003.");
-            }
-            //pms.sleep();
-
-            // MQ sensors task
-            ads.setSingleChannel(0);
-            //for(int i=0; i<128; i++){ // counter is 32, conversion rate is 8 SPS --> 4s
-                ads.startSingleMeasurement();
-                while(ads.isBusy()){delay(0);}
-            //}
-            float voltageMQ131 = ads.getResult_V(); // Get voltage in volts
-            printf("MQ131 Voltage: %fmV\n", voltageMQ131);
-            MQ131.externalADCUpdate(voltageMQ131);
-            float MQ131_PPM = MQ131.readSensor();
-            printf("O3 Concentration: %.2fppm\n", MQ131_PPM);
-            Blynk.virtualWrite(V2, MQ131_PPM);
-
-            ads.setSingleChannel(1);
-            //for(int i=0; i<128; i++){ // counter is 32, conversion rate is 8 SPS --> 4s
-                ads.startSingleMeasurement();
-                while(ads.isBusy()){delay(0);}
-            //}
-            float voltageMQ7 = ads.getResult_V(); // Get voltage in volts
-            printf("MQ7 Voltage: %fmV\n", voltageMQ7);
-            MQ7.externalADCUpdate(voltageMQ7);
-            float MQ7_PPM = MQ7.readSensor();
-            printf("CO Concentration: %.2fppm\n", MQ7_PPM);
-            Blynk.virtualWrite(V3, MQ7_PPM);
-
-            // DHT22 task
-            esp_err_t result = dht_read_float_data(DHT_TYPE_AM2301, DHT_GPIO, &humidity, &temperature); //DHT22
-            // Check if reading is successful
-            if (result == ESP_OK) {
-                printf("Temperature: %.1f*C, Humidity: %.1f%%\n", temperature, humidity);
-                Blynk.virtualWrite(V4, temperature);
-            } else {
-                printf("Failed to read data from DHT22 sensor: %d\n", result);
-            }
-
-            float converted_MQ131_PPM = ppm_to_ugm3(MQ131_PPM, O3_MWEIGHT);
-            float converted_MQ7_PPM = ppm_to_ugm3(MQ7_PPM, CO_MWEIGHT);
-
-            // Concatenate all data into a single string for logging
-            char logEntry[200];
-            sprintf(logEntry, "%d/%d/%d,%02d:%02d:%02d,%.d,%.d,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f",
-                    now.day(), now.month(),now.year(), 
-                    now.hour(), now.minute(), now.second(),
-                    data.PM_AE_UG_2_5, data.PM_AE_UG_10_0,
-                    MQ131_PPM, MQ7_PPM,
-                    converted_MQ131_PPM, converted_MQ7_PPM,
-                    temperature, humidity);
-            logData(logEntry); // Log the concatenated data
-
-            // Update the OLED display with sensor data
-            display.clearDisplay(); // Clear the display buffer
-            display.setTextSize(2); // Normal text size
-            display.setTextColor(SSD1306_WHITE); // Draw white text
-            display.setCursor(0, 0); // Start at top-left corner
-
-            // Display sensors data
-            display.println("AirQuality");
-            display.setTextSize(1);
-            display.printf("PM2.5: %.dug/m3\n", data.PM_AE_UG_2_5);
-            display.printf("PM10.0: %.dug/m3\n", data.PM_AE_UG_10_0);
-            display.printf("O3: %.2fPPM\n", MQ131_PPM);
-            display.printf("CO: %.2fPPM\n", MQ7_PPM);
-            display.printf("Temp: %.1f*C\n", temperature);
-            display.printf("Humid: %.1f%%\n", humidity);
-
-            display.display(); // Show the display buffer on the screen
-            
-            printf("\n");
-
-            vTaskDelay(9000 / portTICK_PERIOD_MS); //Sampling frequency
-        }
-    }
+    xTaskCreate(&rtc_task, "rtc_task", 2048, NULL, 5, NULL);
+    xTaskCreate(&pms_task, "pms_task", 3072, NULL, 5, NULL);
+    xTaskCreate(&mq131_task, "mq131_task", 3072, NULL, 5, NULL);
+    xTaskCreate(&mq7_task, "mq7_task", 3072, NULL, 5, NULL);
+    xTaskCreate(&dht_task, "dht_task", 3072, NULL, 5, NULL);
+    xTaskCreate(&display_task, "display_task", 2432, NULL, 5, NULL);
+    xTaskCreate(&log_task, "log_task", 2688, NULL, 4, NULL);
 }
