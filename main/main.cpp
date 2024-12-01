@@ -79,7 +79,7 @@ ADS1115_WE ads(0x48);
 #define DISPLAY_BIT ( 1 << 5 )
 EventGroupHandle_t sensorEventGroup;
 QueueHandle_t sensorDataQueue;
-SemaphoreHandle_t resultSemaphore;
+//SemaphoreHandle_t resultSemaphore;
 
 typedef struct {
     uint8_t current_day;
@@ -275,7 +275,7 @@ void display_task(void *pvParameter) {
     while (true) {
         // Wait for all sensors to complete
         xEventGroupWaitBits(sensorEventGroup, RTC_BIT | PMS_BIT | MQ131_BIT | MQ7_BIT | DHT_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
-        if (xSemaphoreTake(resultSemaphore, portMAX_DELAY) == pdTRUE) {
+        //if (xSemaphoreTake(resultSemaphore, portMAX_DELAY) == pdTRUE) {
             xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
             xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
             xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
@@ -306,8 +306,8 @@ void display_task(void *pvParameter) {
 
             xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
             xEventGroupSetBits(sensorEventGroup, DISPLAY_BIT);
-            xSemaphoreGive(resultSemaphore);
-        }
+            //xSemaphoreGive(resultSemaphore);
+        //}
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
 }
@@ -315,7 +315,7 @@ void display_task(void *pvParameter) {
 void log_task(void *pvParameter) {
     while(true) {
         xEventGroupWaitBits(sensorEventGroup, DISPLAY_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
-        if (xSemaphoreTake(resultSemaphore, portMAX_DELAY) == pdTRUE) {
+        //if (xSemaphoreTake(resultSemaphore, portMAX_DELAY) == pdTRUE) {
             // Receive data from the queue
             xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
             // Concatenate all data into a single string for logging
@@ -334,8 +334,8 @@ void log_task(void *pvParameter) {
             // Log or print the high watermark
             Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
             
-            xSemaphoreGive(resultSemaphore);
-        }
+            //xSemaphoreGive(resultSemaphore);
+        //}
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
 }
@@ -522,12 +522,12 @@ extern "C" void app_main() {
     }
     
     // Create the semaphore
-    resultSemaphore = xSemaphoreCreateBinary();
+    /*resultSemaphore = xSemaphoreCreateBinary();
     if (resultSemaphore == NULL) {
         Serial.println("Failed to create task semaphore");
         return;
     }
-    xSemaphoreGive(resultSemaphore);
+    xSemaphoreGive(resultSemaphore);*/
 
     Blynk.run();
 
