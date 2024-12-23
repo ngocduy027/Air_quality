@@ -76,10 +76,12 @@ ADS1115_WE ads(0x48);
 #define MQ131_BIT   ( 1 << 2 )
 #define MQ7_BIT     ( 1 << 3 )
 #define DHT_BIT     ( 1 << 4 )
-#define DISPLAY_BIT ( 1 << 5 )
+#define LOG_BIT     ( 1 << 5 )
+#define BLYNK_BIT   ( 1 << 6 )
 EventGroupHandle_t sensorEventGroup;
 QueueHandle_t sensorDataQueue;
-//SemaphoreHandle_t resultSemaphore;
+uint8_t sensorTask = 5;
+uint8_t dataDisplayTask = 2;
 
 typedef struct {
     uint8_t current_day;
@@ -149,7 +151,7 @@ void logData(const char* data) {
     logFile.close();
 }
 
-void rtc_task(void *pvParameter) {
+void rtc_task(void *pvParameters) {
     while(true) {
         // DS3231 task
         DateTime now = rtc.now();
@@ -163,19 +165,19 @@ void rtc_task(void *pvParameter) {
                 daysOfTheWeek[now.dayOfTheWeek()],  
                 dataUpdate.current_day, dataUpdate.current_month, dataUpdate.current_year,
                 dataUpdate.current_hour, dataUpdate.current_minute, dataUpdate.current_second);
-        
-        // Check the stack high watermark
-        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-        // Log or print the high watermark
-        Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
 
         xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
         xEventGroupSetBits(sensorEventGroup, RTC_BIT);
+
+        // Check the stack high watermark
+        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
+        // Log or print the high watermark
+        Serial.printf("RTC Stack High Water Mark: %u words\n", highWaterMark);
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
 }
 
-void pms_task(void *pvParameter) {
+void pms_task(void *pvParameters) {
     while(true) {
         // PMS7003 task
         pms.requestRead(); // Request data from the sensor
@@ -183,159 +185,165 @@ void pms_task(void *pvParameter) {
             dataUpdate.PM_AE_UG_2_5 = data.PM_AE_UG_2_5;
             dataUpdate.PM_AE_UG_10_0 = data.PM_AE_UG_10_0;
             printf("PM2.5: %.dug/m3\nPM10.0: %.dug/m3\n", dataUpdate.PM_AE_UG_2_5, dataUpdate.PM_AE_UG_10_0);
-            Blynk.virtualWrite(V0, dataUpdate.PM_AE_UG_2_5);
-            Blynk.virtualWrite(V1, dataUpdate.PM_AE_UG_10_0);
         } else {
             Serial.println("No data from PMS7003.");
         }
 
+        xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+        xEventGroupSetBits(sensorEventGroup, PMS_BIT);
         // Check the stack high watermark
         UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
         // Log or print the high watermark
-        Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
-
-        xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
-        xEventGroupSetBits(sensorEventGroup, PMS_BIT);
+        Serial.printf("PMS7003 Stack High Water Mark: %u words\n", highWaterMark);
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
 }
 
-void mq131_task(void *pvParameter) {
+void mq131_task(void *pvParameters) {
     while(true) {
         // MQ sensors task
         ads.setSingleChannel(0);
         ads.startSingleMeasurement();
         while(ads.isBusy()){delay(0);}
         float voltageMQ131 = ads.getResult_V(); // Get voltage in volts
-        printf("MQ131 Voltage: %fmV\n", voltageMQ131);
+        printf("MQ131 Voltage: %fV\n", voltageMQ131);
         MQ131.externalADCUpdate(voltageMQ131);
         dataUpdate.MQ131_PPM = MQ131.readSensor();
         printf("O3 Concentration: %.2fppm\n", dataUpdate.MQ131_PPM);
         dataUpdate.converted_MQ131_PPM = ppm_to_ugm3(dataUpdate.MQ131_PPM, O3_MWEIGHT);
-        Blynk.virtualWrite(V2, dataUpdate.MQ131_PPM);
-
-        // Check the stack high watermark
-        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-        // Log or print the high watermark
-        Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
 
         xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
         xEventGroupSetBits(sensorEventGroup, MQ131_BIT);
+        // Check the stack high watermark
+        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
+        // Log or print the high watermark
+        Serial.printf("MQ131 Stack High Water Mark: %u words\n", highWaterMark);
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
 }
 
-void mq7_task(void *pvParameter) {
+void mq7_task(void *pvParameters) {
     while(true) {
         ads.setSingleChannel(1);
         ads.startSingleMeasurement();
         while(ads.isBusy()){delay(0);}
         float voltageMQ7 = ads.getResult_V(); // Get voltage in volts
-        printf("MQ7 Voltage: %fmV\n", voltageMQ7);
+        printf("MQ7 Voltage: %fV\n", voltageMQ7);
         MQ7.externalADCUpdate(voltageMQ7);
         dataUpdate.MQ7_PPM = MQ7.readSensor();
         printf("CO Concentration: %.2fppm\n", dataUpdate.MQ7_PPM);
         dataUpdate.converted_MQ7_PPM = ppm_to_ugm3(dataUpdate.MQ7_PPM, CO_MWEIGHT);
-        Blynk.virtualWrite(V3, dataUpdate.MQ7_PPM);
-
-        // Check the stack high watermark
-        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-        // Log or print the high watermark
-        Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
 
         xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
         xEventGroupSetBits(sensorEventGroup, MQ7_BIT);
+        // Check the stack high watermark
+        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
+        // Log or print the high watermark
+        Serial.printf("MQ7 Stack High Water Mark: %u words\n", highWaterMark);
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
 }
 
-void dht_task(void *pvParameter) {
+void dht_task(void *pvParameters) {
     while(true) {
         // DHT22 task
         esp_err_t result = dht_read_float_data(DHT_TYPE_AM2301, DHT_GPIO, &dataUpdate.humidity, &dataUpdate.temperature);
         if (result == ESP_OK) {
             printf("Temperature: %.1f*C, Humidity: %.1f%%\n", dataUpdate.temperature, dataUpdate.humidity);
-            Blynk.virtualWrite(V4, dataUpdate.temperature);
         } else {
             printf("Failed to read data from DHT22 sensor: %d\n", result);
         }
 
+        xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+        xEventGroupSetBits(sensorEventGroup, DHT_BIT);
         // Check the stack high watermark
         UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
         // Log or print the high watermark
-        Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
-
-        xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
-        xEventGroupSetBits(sensorEventGroup, DHT_BIT);
+        Serial.printf("DHT22 Stack High Water Mark: %u words\n", highWaterMark);
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
 }
 
-void display_task(void *pvParameter) {
+void display_task(void *pvParameters) {
     while (true) {
+        xEventGroupWaitBits(sensorEventGroup, BLYNK_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
+        // Receive data from the queue
+        xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+        // Update the OLED display with sensor data
+        display.clearDisplay(); 
+        display.setTextSize(2); 
+        display.setTextColor(SSD1306_WHITE); 
+        display.setCursor(0, 0); // Start at top-left corner
+
+        // Display sensors data
+        display.println("AirQuality");
+        display.setTextSize(1);
+        display.printf("PM2.5: %.dug/m3\n", dataUpdate.PM_AE_UG_2_5);
+        display.printf("PM10.0: %.dug/m3\n", dataUpdate.PM_AE_UG_10_0);
+        display.printf("O3: %.2fPPM\n", dataUpdate.MQ131_PPM);
+        display.printf("CO: %.2fPPM\n", dataUpdate.MQ7_PPM);
+        display.printf("Temp: %.1f*C\n", dataUpdate.temperature);
+        display.printf("Humid: %.1f%%\n", dataUpdate.humidity);
+
+        display.display(); // Show the display buffer on the screen
+
+        // Check the stack high watermark
+        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
+        // Log or print the high watermark
+        Serial.printf("SSD1306 Stack High Water Mark: %u words\n", highWaterMark);
+        
+        vTaskDelay(5000 / portTICK_PERIOD_MS);
+    }
+}
+
+void log_task(void *pvParameters) {
+    while(true) {
         // Wait for all sensors to complete
         xEventGroupWaitBits(sensorEventGroup, RTC_BIT | PMS_BIT | MQ131_BIT | MQ7_BIT | DHT_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
-        //if (xSemaphoreTake(resultSemaphore, portMAX_DELAY) == pdTRUE) {
+        for(int i = 0; i < sensorTask; i++) {
             xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
-            xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
-            xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
-            xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
-            xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
-            // Update the OLED display with sensor data
-            display.clearDisplay(); 
-            display.setTextSize(2); 
-            display.setTextColor(SSD1306_WHITE); 
-            display.setCursor(0, 0); // Start at top-left corner
-
-            // Display sensors data
-            display.println("AirQuality");
-            display.setTextSize(1);
-            display.printf("PM2.5: %.dug/m3\n", dataUpdate.PM_AE_UG_2_5);
-            display.printf("PM10.0: %.dug/m3\n", dataUpdate.PM_AE_UG_10_0);
-            display.printf("O3: %.2fPPM\n", dataUpdate.MQ131_PPM);
-            display.printf("CO: %.2fPPM\n", dataUpdate.MQ7_PPM);
-            display.printf("Temp: %.1f*C\n", dataUpdate.temperature);
-            display.printf("Humid: %.1f%%\n", dataUpdate.humidity);
-
-            display.display(); // Show the display buffer on the screen
-            
-            // Check the stack high watermark
-            UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-            // Log or print the high watermark
-            Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
-
+        }
+        // Concatenate all data into a single string for logging
+        char logEntry[200];
+        sprintf(logEntry, "%d/%d/%d,%02d:%02d:%02d,%.d,%.d,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f",
+                dataUpdate.current_day, dataUpdate.current_month, dataUpdate.current_year,
+                dataUpdate.current_hour, dataUpdate.current_minute, dataUpdate.current_second,
+                dataUpdate.PM_AE_UG_2_5, dataUpdate.PM_AE_UG_10_0,
+                dataUpdate.MQ131_PPM, dataUpdate.MQ7_PPM,
+                dataUpdate.converted_MQ131_PPM, dataUpdate.converted_MQ7_PPM,
+                dataUpdate.temperature, dataUpdate.humidity);
+        logData(logEntry); // Log the concatenated data
+        for(int i = 0; i < dataDisplayTask; i++) {
             xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
-            xEventGroupSetBits(sensorEventGroup, DISPLAY_BIT);
-            //xSemaphoreGive(resultSemaphore);
-        //}
+        }
+        xEventGroupSetBits(sensorEventGroup, LOG_BIT);
+        // Check the stack high watermark
+        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
+        // Log or print the high watermark
+        Serial.printf("SDCard Stack High Water Mark: %u words\n", highWaterMark);
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
 }
 
-void log_task(void *pvParameter) {
+void blynk_task(void *pvParameters) {
     while(true) {
-        xEventGroupWaitBits(sensorEventGroup, DISPLAY_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
-        //if (xSemaphoreTake(resultSemaphore, portMAX_DELAY) == pdTRUE) {
-            // Receive data from the queue
-            xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
-            // Concatenate all data into a single string for logging
-            char logEntry[200];
-            sprintf(logEntry, "%d/%d/%d,%02d:%02d:%02d,%.d,%.d,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f",
-                    dataUpdate.current_day, dataUpdate.current_month, dataUpdate.current_year,
-                    dataUpdate.current_hour, dataUpdate.current_minute, dataUpdate.current_second,
-                    dataUpdate.PM_AE_UG_2_5, dataUpdate.PM_AE_UG_10_0,
-                    dataUpdate.MQ131_PPM, dataUpdate.MQ7_PPM,
-                    dataUpdate.converted_MQ131_PPM, dataUpdate.converted_MQ7_PPM,
-                    dataUpdate.temperature, dataUpdate.humidity);
-            logData(logEntry); // Log the concatenated data
+        xEventGroupWaitBits(sensorEventGroup, LOG_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
+        // Receive data from the queue
+        xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+        Blynk.run();
+        // Send data to Blynk
+        Blynk.virtualWrite(V0, dataUpdate.PM_AE_UG_2_5);
+        Blynk.virtualWrite(V1, dataUpdate.PM_AE_UG_10_0);
+        Blynk.virtualWrite(V2, dataUpdate.MQ131_PPM);
+        Blynk.virtualWrite(V3, dataUpdate.MQ7_PPM);
+        Blynk.virtualWrite(V4, dataUpdate.temperature);
 
-            // Check the stack high watermark
-            UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-            // Log or print the high watermark
-            Serial.printf("Stack High Water Mark: %u words\n", highWaterMark);
-            
-            //xSemaphoreGive(resultSemaphore);
-        //}
+        xEventGroupSetBits(sensorEventGroup, BLYNK_BIT);
+        // Check the stack high watermark
+        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
+        // Log or print the high watermark
+        Serial.printf("Blynk Stack High Water Mark: %u words\n", highWaterMark);
+
         vTaskDelay(5000 / portTICK_PERIOD_MS);
     }
 }
@@ -419,6 +427,7 @@ extern "C" void app_main() {
 
     // Initialize PMS7003
     pms.passiveMode();
+    pms.wakeUp();
 
     //Initiate ADS1115
     ads.init();
@@ -520,22 +529,16 @@ extern "C" void app_main() {
         Serial.println("Failed to create sensor data queue");
         return;
     }
-    
-    // Create the semaphore
-    /*resultSemaphore = xSemaphoreCreateBinary();
-    if (resultSemaphore == NULL) {
-        Serial.println("Failed to create task semaphore");
-        return;
-    }
-    xSemaphoreGive(resultSemaphore);*/
 
-    Blynk.run();
+    // Sensor tasks
+    xTaskCreatePinnedToCore(&rtc_task, "rtc_task", 2048, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(&pms_task, "pms_task", 3072, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(&mq131_task, "mq131_task", 3072, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(&mq7_task, "mq7_task", 3072, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(&dht_task, "dht_task", 3072, NULL, 5, NULL, 1);
 
-    xTaskCreate(&rtc_task, "rtc_task", 2048, NULL, 3, NULL);
-    xTaskCreate(&pms_task, "pms_task", 3072, NULL, 3, NULL);
-    xTaskCreate(&mq131_task, "mq131_task", 3072, NULL, 3, NULL);
-    xTaskCreate(&mq7_task, "mq7_task", 3072, NULL, 3, NULL);
-    xTaskCreate(&dht_task, "dht_task", 3072, NULL, 3, NULL);
-    xTaskCreate(&display_task, "display_task", 2432, NULL, 2, NULL);
-    xTaskCreate(&log_task, "log_task", 2688, NULL, 1, NULL);
+    // Data processing tasks
+    xTaskCreatePinnedToCore(&log_task, "log_task", 2688, NULL, 4, NULL, 1);
+    xTaskCreatePinnedToCore(&blynk_task, "blynk_task", 4096, NULL, 3, NULL, 0);
+    xTaskCreatePinnedToCore(&display_task, "display_task", 2432, NULL, 1, NULL, 1);
 }
