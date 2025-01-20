@@ -21,8 +21,8 @@
 #include <WiFiClient.h>
 #include <BlynkSimpleEsp32.h>
 
-char ssid[] = "Thach";
-char pass[] = "duyvi028";
+char ssid[] = "Galaxy S23 1A77";
+char pass[] = "kvzrzwi2yya4czi";
 
 RTC_DS3231 rtc;
 char daysOfTheWeek[7][12] = {"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"};
@@ -78,10 +78,11 @@ ADS1115_WE ads(0x48);
 #define DHT_BIT     ( 1 << 4 )
 #define LOG_BIT     ( 1 << 5 )
 #define BLYNK_BIT   ( 1 << 6 )
+#define AQI_BIT     ( 1 << 7 )
 EventGroupHandle_t sensorEventGroup;
 QueueHandle_t sensorDataQueue;
 uint8_t sensorTask = 5;
-uint8_t dataDisplayTask = 2;
+uint8_t dataDisplayTask = 3;
 
 typedef struct {
     uint8_t current_day;
@@ -94,12 +95,18 @@ typedef struct {
     uint16_t PM_AE_UG_10_0;
     float MQ131_PPM;
     float MQ7_PPM;
-    float converted_MQ131_PPM;
-    float converted_MQ7_PPM;  
     float humidity;
     float temperature;
+    uint16_t aqiPM25;
+    uint16_t aqiPM10;
+    uint16_t aqiO3;
+    uint16_t aqiCO;
 } SensorsData;
 SensorsData dataUpdate;
+
+int aqiSummary;
+
+TaskHandle_t alarmTaskHandle = NULL;
 
 void writeFile(fs::FS &fs, const char *path, const char *message) {
     Serial.printf("Writing file: %s\n", path);
@@ -141,9 +148,9 @@ void logData(const char* data) {
 
     // Write the data to the log file
     if (logFile.println(data)) {
-        Serial.println("Data logged successfully");
+        Serial.println("Data logged successfully\n");
     } else {
-        Serial.println("Failed to write data to log file");
+        Serial.println("Failed to write data to log file\n");
     }
 
     // Ensure data is written to the file
@@ -152,6 +159,10 @@ void logData(const char* data) {
 }
 
 void rtc_task(void *pvParameters) {
+    TickType_t xLastWakeTime;
+    const TickType_t xFrequency = 15000 / portTICK_PERIOD_MS;
+    xLastWakeTime = xTaskGetTickCount();
+
     while(true) {
         // DS3231 task
         DateTime now = rtc.now();
@@ -168,16 +179,15 @@ void rtc_task(void *pvParameters) {
 
         xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
         xEventGroupSetBits(sensorEventGroup, RTC_BIT);
-
-        // Check the stack high watermark
-        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-        // Log or print the high watermark
-        Serial.printf("RTC Stack High Water Mark: %u words\n", highWaterMark);
-        vTaskDelay(5000 / portTICK_PERIOD_MS);
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
 }
 
 void pms_task(void *pvParameters) {
+    TickType_t xLastWakeTime;
+    const TickType_t xFrequency = 15000 / portTICK_PERIOD_MS;
+    xLastWakeTime = xTaskGetTickCount();
+
     while(true) {
         // PMS7003 task
         pms.requestRead(); // Request data from the sensor
@@ -191,60 +201,58 @@ void pms_task(void *pvParameters) {
 
         xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
         xEventGroupSetBits(sensorEventGroup, PMS_BIT);
-        // Check the stack high watermark
-        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-        // Log or print the high watermark
-        Serial.printf("PMS7003 Stack High Water Mark: %u words\n", highWaterMark);
-        vTaskDelay(5000 / portTICK_PERIOD_MS);
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
 }
 
 void mq131_task(void *pvParameters) {
+    TickType_t xLastWakeTime;
+    const TickType_t xFrequency = 15000 / portTICK_PERIOD_MS;
+    xLastWakeTime = xTaskGetTickCount();
+
     while(true) {
         // MQ sensors task
         ads.setSingleChannel(0);
         ads.startSingleMeasurement();
         while(ads.isBusy()){delay(0);}
         float voltageMQ131 = ads.getResult_V(); // Get voltage in volts
-        printf("MQ131 Voltage: %fV\n", voltageMQ131);
+        //printf("MQ131 Voltage: %fV\n", voltageMQ131);
         MQ131.externalADCUpdate(voltageMQ131);
         dataUpdate.MQ131_PPM = MQ131.readSensor();
         printf("O3 Concentration: %.2fppm\n", dataUpdate.MQ131_PPM);
-        dataUpdate.converted_MQ131_PPM = ppm_to_ugm3(dataUpdate.MQ131_PPM, O3_MWEIGHT);
 
         xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
         xEventGroupSetBits(sensorEventGroup, MQ131_BIT);
-        // Check the stack high watermark
-        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-        // Log or print the high watermark
-        Serial.printf("MQ131 Stack High Water Mark: %u words\n", highWaterMark);
-        vTaskDelay(5000 / portTICK_PERIOD_MS);
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
 }
 
 void mq7_task(void *pvParameters) {
+    TickType_t xLastWakeTime;
+    const TickType_t xFrequency = 15000 / portTICK_PERIOD_MS;
+    xLastWakeTime = xTaskGetTickCount();
+
     while(true) {
         ads.setSingleChannel(1);
         ads.startSingleMeasurement();
         while(ads.isBusy()){delay(0);}
         float voltageMQ7 = ads.getResult_V(); // Get voltage in volts
-        printf("MQ7 Voltage: %fV\n", voltageMQ7);
+        //printf("MQ7 Voltage: %fV\n", voltageMQ7);
         MQ7.externalADCUpdate(voltageMQ7);
         dataUpdate.MQ7_PPM = MQ7.readSensor();
         printf("CO Concentration: %.2fppm\n", dataUpdate.MQ7_PPM);
-        dataUpdate.converted_MQ7_PPM = ppm_to_ugm3(dataUpdate.MQ7_PPM, CO_MWEIGHT);
 
         xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
         xEventGroupSetBits(sensorEventGroup, MQ7_BIT);
-        // Check the stack high watermark
-        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-        // Log or print the high watermark
-        Serial.printf("MQ7 Stack High Water Mark: %u words\n", highWaterMark);
-        vTaskDelay(5000 / portTICK_PERIOD_MS);
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
 }
 
 void dht_task(void *pvParameters) {
+    TickType_t xLastWakeTime;
+    const TickType_t xFrequency = 15000 / portTICK_PERIOD_MS;
+    xLastWakeTime = xTaskGetTickCount();
+
     while(true) {
         // DHT22 task
         esp_err_t result = dht_read_float_data(DHT_TYPE_AM2301, DHT_GPIO, &dataUpdate.humidity, &dataUpdate.temperature);
@@ -256,16 +264,16 @@ void dht_task(void *pvParameters) {
 
         xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
         xEventGroupSetBits(sensorEventGroup, DHT_BIT);
-        // Check the stack high watermark
-        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-        // Log or print the high watermark
-        Serial.printf("DHT22 Stack High Water Mark: %u words\n", highWaterMark);
-        vTaskDelay(5000 / portTICK_PERIOD_MS);
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
 }
 
 void display_task(void *pvParameters) {
-    while (true) {
+    TickType_t xLastWakeTime;
+    const TickType_t xFrequency = 15000 / portTICK_PERIOD_MS;
+    xLastWakeTime = xTaskGetTickCount();
+
+    while(true) {
         xEventGroupWaitBits(sensorEventGroup, BLYNK_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
         // Receive data from the queue
         xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
@@ -276,7 +284,7 @@ void display_task(void *pvParameters) {
         display.setCursor(0, 0); // Start at top-left corner
 
         // Display sensors data
-        display.println("AirQuality");
+        display.printf("AQI: %d\n", aqiSummary);
         display.setTextSize(1);
         display.printf("PM2.5: %.dug/m3\n", dataUpdate.PM_AE_UG_2_5);
         display.printf("PM10.0: %.dug/m3\n", dataUpdate.PM_AE_UG_10_0);
@@ -286,46 +294,40 @@ void display_task(void *pvParameters) {
         display.printf("Humid: %.1f%%\n", dataUpdate.humidity);
 
         display.display(); // Show the display buffer on the screen
-
-        // Check the stack high watermark
-        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-        // Log or print the high watermark
-        Serial.printf("SSD1306 Stack High Water Mark: %u words\n", highWaterMark);
-        
-        vTaskDelay(5000 / portTICK_PERIOD_MS);
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
 }
 
 void log_task(void *pvParameters) {
+    TickType_t xLastWakeTime;
+    const TickType_t xFrequency = 15000 / portTICK_PERIOD_MS;
+    xLastWakeTime = xTaskGetTickCount();
+
     while(true) {
         // Wait for all sensors to complete
-        xEventGroupWaitBits(sensorEventGroup, RTC_BIT | PMS_BIT | MQ131_BIT | MQ7_BIT | DHT_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
-        for(int i = 0; i < sensorTask; i++) {
-            xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
-        }
+        xEventGroupWaitBits(sensorEventGroup, AQI_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
+        xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
         // Concatenate all data into a single string for logging
         char logEntry[200];
-        sprintf(logEntry, "%d/%d/%d,%02d:%02d:%02d,%.d,%.d,%.2f,%.2f,%.2f,%.2f,%.1f,%.1f",
+        sprintf(logEntry, "%d/%d/%d,%02d:%02d:%02d,%.d,%.d,%.2f,%.2f,%.1f,%.1f,%d,%d,%d,%d",
                 dataUpdate.current_day, dataUpdate.current_month, dataUpdate.current_year,
                 dataUpdate.current_hour, dataUpdate.current_minute, dataUpdate.current_second,
                 dataUpdate.PM_AE_UG_2_5, dataUpdate.PM_AE_UG_10_0,
                 dataUpdate.MQ131_PPM, dataUpdate.MQ7_PPM,
-                dataUpdate.converted_MQ131_PPM, dataUpdate.converted_MQ7_PPM,
-                dataUpdate.temperature, dataUpdate.humidity);
+                dataUpdate.temperature, dataUpdate.humidity,
+                dataUpdate.aqiPM25, dataUpdate.aqiPM10,
+                dataUpdate.aqiO3, dataUpdate.aqiCO);
         logData(logEntry); // Log the concatenated data
-        for(int i = 0; i < dataDisplayTask; i++) {
-            xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
-        }
         xEventGroupSetBits(sensorEventGroup, LOG_BIT);
-        // Check the stack high watermark
-        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-        // Log or print the high watermark
-        Serial.printf("SDCard Stack High Water Mark: %u words\n", highWaterMark);
-        vTaskDelay(5000 / portTICK_PERIOD_MS);
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
     }
 }
 
 void blynk_task(void *pvParameters) {
+    TickType_t xLastWakeTime;
+    const TickType_t xFrequency = 15000 / portTICK_PERIOD_MS;
+    xLastWakeTime = xTaskGetTickCount();
+
     while(true) {
         xEventGroupWaitBits(sensorEventGroup, LOG_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
         // Receive data from the queue
@@ -339,12 +341,126 @@ void blynk_task(void *pvParameters) {
         Blynk.virtualWrite(V4, dataUpdate.temperature);
 
         xEventGroupSetBits(sensorEventGroup, BLYNK_BIT);
-        // Check the stack high watermark
-        UBaseType_t highWaterMark = uxTaskGetStackHighWaterMark(NULL);
-        // Log or print the high watermark
-        Serial.printf("Blynk Stack High Water Mark: %u words\n", highWaterMark);
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    }
+}
 
-        vTaskDelay(5000 / portTICK_PERIOD_MS);
+float calculateAQI(float concentration, float c_low, float c_high, int aqi_low, int aqi_high) {
+    return ((aqi_high - aqi_low) / (c_high - c_low)) * (concentration - c_low) + aqi_low;
+}
+
+void aqi_task(void *pvParameters) {
+    TickType_t xLastWakeTime;
+    const TickType_t xFrequency = 15000 / portTICK_PERIOD_MS;
+    xLastWakeTime = xTaskGetTickCount();
+
+    while(true) {
+        // Wait for all sensors to complete
+        xEventGroupWaitBits(sensorEventGroup, RTC_BIT | PMS_BIT | MQ131_BIT | MQ7_BIT | DHT_BIT, pdTRUE, pdTRUE, portMAX_DELAY);
+        for(int i = 0; i < sensorTask; i++) {
+            xQueueReceive(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+        }
+        // Calculate AQI for PM2.5 (max 500 value is 325.4 μg/m3)
+        if (dataUpdate.PM_AE_UG_2_5 <= 9.0) {
+            dataUpdate.aqiPM25 = calculateAQI(dataUpdate.PM_AE_UG_2_5, 0, 9.0, 0, 50);
+        } else if (dataUpdate.PM_AE_UG_2_5 <= 35.4) {
+            dataUpdate.aqiPM25 = calculateAQI(dataUpdate.PM_AE_UG_2_5, 9.1, 35.4, 51, 100);
+        } else if (dataUpdate.PM_AE_UG_2_5 <= 55.4) {
+            dataUpdate.aqiPM25 = calculateAQI(dataUpdate.PM_AE_UG_2_5, 35.5, 55.4, 101, 150);
+        } else if (dataUpdate.PM_AE_UG_2_5 <= 125.4) {
+            dataUpdate.aqiPM25 = calculateAQI(dataUpdate.PM_AE_UG_2_5, 55.5, 125.4, 151, 200);
+        } else if (dataUpdate.PM_AE_UG_2_5 <= 225.4) {
+            dataUpdate.aqiPM25 = calculateAQI(dataUpdate.PM_AE_UG_2_5, 125.5, 225.4, 201, 300);
+        } else {
+            dataUpdate.aqiPM25 = calculateAQI(dataUpdate.PM_AE_UG_2_5, 225.5, 325.4, 301, 500);
+        }
+
+        // Calculate AQI for PM10 (max 500 value is 604 μg/m3)
+        if (dataUpdate.PM_AE_UG_10_0 <= 54) {
+            dataUpdate.aqiPM10 = calculateAQI(dataUpdate.PM_AE_UG_10_0, 0, 54, 0, 50);
+        } else if (dataUpdate.PM_AE_UG_10_0 <= 154) {
+            dataUpdate.aqiPM10 = calculateAQI(dataUpdate.PM_AE_UG_10_0, 55, 154, 51, 100);
+        } else if (dataUpdate.PM_AE_UG_10_0 <= 254) {
+            dataUpdate.aqiPM10 = calculateAQI(dataUpdate.PM_AE_UG_10_0, 155, 254, 101, 150);
+        } else if (dataUpdate.PM_AE_UG_10_0 <= 354) {
+            dataUpdate.aqiPM10 = calculateAQI(dataUpdate.PM_AE_UG_10_0, 255, 354, 151, 200);
+        } else if (dataUpdate.PM_AE_UG_10_0 <= 424) {
+            dataUpdate.aqiPM10 = calculateAQI(dataUpdate.PM_AE_UG_10_0, 355, 424, 201, 300);
+        } else {
+            dataUpdate.aqiPM10 = calculateAQI(dataUpdate.PM_AE_UG_10_0, 425, 604, 301, 500);
+        }
+
+        // Calculate AQI for O3 (max 500 value is 0.604 ppm)
+        if (dataUpdate.MQ131_PPM <= 0.054) {
+            dataUpdate.aqiO3 = calculateAQI(dataUpdate.MQ131_PPM, 0, 0.054, 0, 50);
+        } else if (dataUpdate.MQ131_PPM <= 0.070) {
+            dataUpdate.aqiO3 = calculateAQI(dataUpdate.MQ131_PPM, 0.055, 0.070, 51, 100);
+        } else if (dataUpdate.MQ131_PPM <= 0.085) {
+            dataUpdate.aqiO3 = calculateAQI(dataUpdate.MQ131_PPM, 0.071, 0.085, 101, 150);
+        } else if (dataUpdate.MQ131_PPM <= 0.105) {
+            dataUpdate.aqiO3 = calculateAQI(dataUpdate.MQ131_PPM, 0.086, 0.105, 151, 200);
+        } else if (dataUpdate.MQ131_PPM <= 0.200) {
+            dataUpdate.aqiO3 = calculateAQI(dataUpdate.MQ131_PPM, 0.106, 0.200, 201, 300);
+        } else {
+            dataUpdate.aqiO3 = calculateAQI(dataUpdate.MQ131_PPM, 0.201, 0.604, 301, 500);
+        }
+
+        // Calculate AQI for CO (max 500 value is 50.4 ppm)
+        if (dataUpdate.MQ7_PPM <= 4.4) {
+            dataUpdate.aqiCO = calculateAQI(dataUpdate.MQ7_PPM, 0, 4.4, 0, 50);
+        } else if (dataUpdate.MQ7_PPM <= 9.4) {
+            dataUpdate.aqiCO = calculateAQI(dataUpdate.MQ7_PPM, 4.5, 9.4, 51, 100);
+        } else if (dataUpdate.MQ7_PPM <= 12.4) {
+            dataUpdate.aqiCO = calculateAQI(dataUpdate.MQ7_PPM, 9.5, 12.4, 101, 150);
+        } else if (dataUpdate.MQ7_PPM <= 15.4) {
+            dataUpdate.aqiCO = calculateAQI(dataUpdate.MQ7_PPM, 12.5, 15.4, 151, 200);
+        } else if (dataUpdate.MQ7_PPM <= 30.4) {
+            dataUpdate.aqiCO = calculateAQI(dataUpdate.MQ7_PPM, 15.5, 30.4, 201, 300);
+        } else {
+            dataUpdate.aqiCO = calculateAQI(dataUpdate.MQ7_PPM, 40.5, 50.4, 401, 500);
+        }
+
+        // Calculate summary AQI (highest value)
+        aqiSummary = max(max(max(dataUpdate.aqiPM25, dataUpdate.aqiPM10), 
+                         dataUpdate.aqiO3), dataUpdate.aqiCO);
+
+        // Check if air quality is unhealthy or worse
+        if (aqiSummary >= 151) {
+            xTaskNotify(alarmTaskHandle, aqiSummary, eSetValueWithOverwrite);
+        }
+        for(int i = 0; i < dataDisplayTask; i++) {
+            xQueueSend(sensorDataQueue, &dataUpdate, portMAX_DELAY);
+        }
+        xEventGroupSetBits(sensorEventGroup, AQI_BIT);
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    }
+}
+
+void alarm_task(void *pvParameters) {
+    const int LED_PIN = 2;  // Onboard LED pin for ESP32 DevKit V1
+    pinMode(LED_PIN, OUTPUT);
+    
+    while(true) {
+        uint32_t aqiValue;
+        if (xTaskNotifyWait(0, 0, &aqiValue, portMAX_DELAY) == pdTRUE) {
+            String warningMsg;
+            if (aqiValue >= 301) {
+                warningMsg = "HAZARDOUS Air Quality!";
+            } else if (aqiValue >= 201) {
+                warningMsg = "VERY UNHEALTHY Air Quality!";
+            } else if (aqiValue >= 151) {
+                warningMsg = "UNHEALTHY Air Quality!";
+            }
+            
+            // Print warning and flash LED
+            Serial.println(warningMsg);
+            for(int i = 0; i < 3; i++) {
+                digitalWrite(LED_PIN, HIGH);
+                vTaskDelay(500 / portTICK_PERIOD_MS);
+                digitalWrite(LED_PIN, LOW);
+                vTaskDelay(500 / portTICK_PERIOD_MS);
+            }
+        }
     }
 }
 
@@ -400,7 +516,7 @@ extern "C" void app_main() {
     if (!SD.exists("/aq_log.csv")) {
         Serial.println("Log file does not exist. Attempting to create it...");
         // Attempt to create the file
-        writeFile(SD, "/aq_log.csv", "Date,Time,PM 2.5,PM 10.0,O3(PPM),CO(PPM),O3(ug/m3),CO(ug/m3),Temperature,Humidity\n");
+        writeFile(SD, "/aq_log.csv", "Date,Time,PM 2.5,PM 10.0,O3(PPM),CO(PPM),Temperature,Humidity,AQI_PM2.5,AQI_PM10,AQI_O3,AQI_CO\n");
     }
     else{
         printf("File existed!\n");
@@ -524,21 +640,25 @@ extern "C" void app_main() {
     sensorEventGroup = xEventGroupCreate();
     
     // Create the queue
-    sensorDataQueue = xQueueCreate(5, sizeof(SensorsData));
+    sensorDataQueue = xQueueCreate(8, sizeof(SensorsData));
     if (sensorDataQueue == NULL) {
         Serial.println("Failed to create sensor data queue");
         return;
     }
 
     // Sensor tasks
-    xTaskCreatePinnedToCore(&rtc_task, "rtc_task", 2048, NULL, 5, NULL, 1);
-    xTaskCreatePinnedToCore(&pms_task, "pms_task", 3072, NULL, 5, NULL, 1);
-    xTaskCreatePinnedToCore(&mq131_task, "mq131_task", 3072, NULL, 5, NULL, 1);
-    xTaskCreatePinnedToCore(&mq7_task, "mq7_task", 3072, NULL, 5, NULL, 1);
-    xTaskCreatePinnedToCore(&dht_task, "dht_task", 3072, NULL, 5, NULL, 1);
+    xTaskCreate(&rtc_task, "rtc_task", 2304, NULL, 5, NULL);
+    xTaskCreate(&pms_task, "pms_task", 2496, NULL, 5, NULL);
+    xTaskCreate(&mq131_task, "mq131_task", 2560, NULL, 5, NULL);
+    xTaskCreate(&mq7_task, "mq7_task", 2624, NULL, 5, NULL);
+    xTaskCreate(&dht_task, "dht_task", 2688, NULL, 5, NULL);
 
     // Data processing tasks
-    xTaskCreatePinnedToCore(&log_task, "log_task", 2688, NULL, 4, NULL, 1);
-    xTaskCreatePinnedToCore(&blynk_task, "blynk_task", 4096, NULL, 3, NULL, 0);
-    xTaskCreatePinnedToCore(&display_task, "display_task", 2432, NULL, 1, NULL, 1);
+    xTaskCreate(&aqi_task, "aqi_task", 2048, NULL, 4, NULL);
+    xTaskCreate(&log_task, "log_task", 2944, NULL, 4, NULL);
+    xTaskCreate(&blynk_task, "blynk_task", 3712, NULL, 3, NULL);
+    xTaskCreate(&display_task, "display_task", 2688, NULL, 1, NULL);
+
+    //Alarm task
+    xTaskCreate(&alarm_task, "alarm_task", 2304, NULL, 5, &alarmTaskHandle);
 }
